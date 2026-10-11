@@ -1,5 +1,10 @@
 # agent-dx 调度器的最小开发环境
 
+节点物理操作日志固定在 `/home/akernel/adx/operations/sandboxd.sqlite`，与 Redis、
+结果补交日志和检查点分开。节点启动必须配置 `sandboxd_operation_journal`；
+重启保留日志及其锁文件，不能放进临时配置目录或通过删库处理未知创建结果。
+这份日志记录物理操作事实，不替代统一宿主预算。
+
 此配置在 BareMetal1 上建立单独的开发容器，不需要 Kubernetes、YuanRong、DataSystem、Kata、Firecracker 或 OpenTelemetry 收集器。它使用一个 Coordinator、一个节点服务、一个 Redis 和 gVisor。构建产物先冻结，镜像构建只安装依赖及校验输入 SHA256，不在部署时重新编译源码。
 
 `builder/scheduler-dev.Dockerfile` 的构建上下文包含 `payload/`、根目录相对路径的 `SHA256SUMS` 和固定 AKernel 提交的 `source/`。`payload/opt/adx/current/` 是经过 `agent-dx/build/release/package.py verify` 验证的完整发布包，`payload/usr/local/bin/` 包含对应 sandboxd、sbox、完整 gVisor 发布包及静态 distill-fs。版本台账记录这些独立组件的完整提交、归档和二进制身份。

@@ -159,6 +159,7 @@ data:
           advertised_address: ${INSTANCE_IP}:19001
           proxy_address: ${INSTANCE_IP}:19002
           sandboxd_socket: /run/sandboxd/sandboxd.sock
+          sandboxd_operation_journal: /home/akernel/adx/operations/sandboxd.sqlite
           proxy_socket: /home/akernel/adx/run/node/route.sock
           report_interval_seconds: {{ .Values.adx.node.reportIntervalSeconds }}
           rpc_timeout_seconds: 30

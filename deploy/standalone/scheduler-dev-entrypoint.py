@@ -112,6 +112,8 @@ def prepare_config(templates=Path("/etc/akernel/dev-templates"),
             }
             service["config"]["checkpoint_dir"] = str(
                 STATE / "sandboxd/root/checkpoints/adx")
+            service["config"]["sandboxd_operation_journal"] = str(
+                adx / "operations/sandboxd.sqlite")
     output.write_text(json.dumps(expanded))
     subprocess.run([adxctl, "--config", str(output), "validate"], check=True)
 
