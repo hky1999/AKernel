@@ -89,6 +89,14 @@ class FixedCapacityLeaseTest(unittest.TestCase):
         with self.assertRaises(BlockingIOError):
             entrypoint.FixedCapacityLease()
 
+    def test_initial_publication_cannot_overwrite_an_active_provider(self):
+        path = self.state / "adx/capacity.json"
+        original = path.read_bytes()
+        self.clock.return_value = 3000
+        with self.assertRaises(BlockingIOError):
+            entrypoint.write_capacity(self.state / "adx")
+        self.assertEqual(path.read_bytes(), original)
+
 
 if __name__ == "__main__":
     unittest.main()

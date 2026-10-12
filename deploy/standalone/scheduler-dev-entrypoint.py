@@ -21,7 +21,7 @@ CAPACITY_VALID_SECONDS = 60
 CAPACITY_REFRESH_SECONDS = 10
 
 
-def write_capacity(adx):
+def write_capacity(adx, owned_lock=None):
     """Publish the fixed experiment allocation without exposing a partial file."""
     if (adx / "capacity.json").is_symlink():
         raise RuntimeError("容量文件不能是软链接")
@@ -31,8 +31,18 @@ def write_capacity(adx):
         "devices": [],
         "valid_until_unix_seconds": int(time.time()) + CAPACITY_VALID_SECONDS,
     }
-    fd, name = tempfile.mkstemp(prefix=".capacity-", dir=adx)
+    lock = owned_lock
+    if lock is None:
+        lock = os.open(adx / "capacity.lock",
+                       os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            os.close(lock)
+            raise
+    name = None
     try:
+        fd, name = tempfile.mkstemp(prefix=".capacity-", dir=adx)
         with os.fdopen(fd, "w") as stream:
             json.dump(capacity, stream)
             stream.flush()
@@ -44,8 +54,10 @@ def write_capacity(adx):
         finally:
             os.close(directory)
     finally:
-        if os.path.exists(name):
+        if name is not None and os.path.exists(name):
             os.unlink(name)
+        if owned_lock is None:
+            os.close(lock)
 
 
 class FixedCapacityLease:
@@ -83,7 +95,7 @@ class FixedCapacityLease:
         path = STATE / "adx/capacity.json"
         if path.is_symlink() or path.read_bytes() != self.previous:
             raise RuntimeError("容量文件已被其他写入者修改")
-        write_capacity(STATE / "adx")
+        write_capacity(STATE / "adx", owned_lock=self.lock)
         self.previous = path.read_bytes()
 
 
