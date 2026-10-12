@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """启动有独立持久目录和固定容量的单节点开发环境。"""
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -8,12 +9,82 @@ import secrets
 import shutil
 import signal
 import subprocess
+import sys
+import tempfile
 import time
 
 import yaml
 
 STATE = Path("/home/akernel")
 CGROUP = Path("/sys/fs/cgroup")
+CAPACITY_VALID_SECONDS = 60
+CAPACITY_REFRESH_SECONDS = 10
+
+
+def write_capacity(adx):
+    """Publish the fixed experiment allocation without exposing a partial file."""
+    if (adx / "capacity.json").is_symlink():
+        raise RuntimeError("容量文件不能是软链接")
+    capacity = {
+        "capacity": {"cpu_millis": 3000, "memory_bytes": 12 * 1024**3,
+                     "disk_bytes": 16 * 1024**3},
+        "devices": [],
+        "valid_until_unix_seconds": int(time.time()) + CAPACITY_VALID_SECONDS,
+    }
+    fd, name = tempfile.mkstemp(prefix=".capacity-", dir=adx)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(capacity, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, adx / "capacity.json")
+        directory = os.open(adx, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+class FixedCapacityLease:
+    """Renew only the original, bounded single-node development allocation."""
+
+    def __init__(self):
+        self.directories = (CGROUP, CGROUP / "services", STATE / "adx")
+        self.identities = [(path.stat().st_dev, path.stat().st_ino)
+                           for path in self.directories]
+        self.previous = (STATE / "adx/capacity.json").read_bytes()
+        self.lock = os.open(STATE / "adx/capacity.lock",
+                            os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            os.close(self.lock)
+            raise
+
+    def close(self):
+        os.close(self.lock)
+
+    def renew(self):
+        for path, original in zip(self.directories, self.identities):
+            current = path.lstat()
+            if path.is_symlink() or (current.st_dev, current.st_ino) != original:
+                raise RuntimeError("容量来源目录已被替换")
+        if (CGROUP / "cpu.max").read_text().split() != ["400000", "100000"]:
+            raise RuntimeError("开发环境的固定 CPU 上限发生变化")
+        if (CGROUP / "memory.max").read_text().strip() != str(16 * 1024**3):
+            raise RuntimeError("开发环境的固定内存上限发生变化")
+        if (CGROUP / "services/memory.max").read_text().strip() != str(4 * 1024**3):
+            raise RuntimeError("控制服务的内存预留发生变化")
+        if shutil.disk_usage(STATE).free < 16 * 1024**3:
+            raise RuntimeError("磁盘剩余空间不足以维持固定开发容量")
+        path = STATE / "adx/capacity.json"
+        if path.is_symlink() or path.read_bytes() != self.previous:
+            raise RuntimeError("容量文件已被其他写入者修改")
+        write_capacity(STATE / "adx")
+        self.previous = path.read_bytes()
 
 
 def prepare_cgroup():
@@ -75,12 +146,7 @@ def prepare_config(templates=Path("/etc/akernel/dev-templates"),
             stream.write(secrets.token_urlsafe(48) + "\n")
     key.chmod(0o600)
     # 预留 4 GiB 给控制服务、运行时及缓存；容量只由这一节点通告一次。
-    capacity = {
-        "capacity": {"cpu_millis": 3000, "memory_bytes": 12 * 1024**3,
-                     "disk_bytes": 16 * 1024**3},
-        "devices": [], "valid_until_unix_seconds": int(time.time()) + 86400,
-    }
-    (adx / "capacity.json").write_text(json.dumps(capacity))
+    write_capacity(adx)
     deployment = {
         "schema_version": 1, "profile": "standalone", "internal_security": "network",
         "namespace": "akernel-agent-dx-dev",
@@ -121,6 +187,7 @@ def prepare_config(templates=Path("/etc/akernel/dev-templates"),
 def main():
     prepare_cgroup()
     prepare_config()
+    capacity_lease = FixedCapacityLease()
     subprocess.run(["/usr/local/bin/sandboxd-network-prepare"], check=True)
     (STATE / "logs/sandboxd").mkdir(parents=True, exist_ok=True)
     daemon = subprocess.Popen([
@@ -144,9 +211,19 @@ def main():
                 raise RuntimeError("sandboxd 未在期限内提供服务")
             time.sleep(0.25)
         children.append(subprocess.Popen(["/usr/local/bin/adx-service", "run"]))
+        next_capacity_refresh = 0
         while not stopped:
             if any(child.poll() is not None for child in children):
                 raise RuntimeError("开发环境服务意外退出")
+            if time.monotonic() >= next_capacity_refresh:
+                try:
+                    capacity_lease.renew()
+                except (OSError, RuntimeError):
+                    # Keep existing executions and reconciliation alive. The
+                    # previous observation expires instead of granting capacity.
+                    print("固定容量无法续期，等待原观测过期并关闭新任务准入",
+                          file=sys.stderr, flush=True)
+                next_capacity_refresh = time.monotonic() + CAPACITY_REFRESH_SECONDS
             time.sleep(0.5)
     finally:
         # 先让调度服务结束，再终止 daemon；不删除物理状态或清空账本。
@@ -157,6 +234,7 @@ def main():
                     child.wait(timeout=100)
                 except subprocess.TimeoutExpired:
                     raise RuntimeError("服务未正常结束，保留环境用于检查")
+        capacity_lease.close()
 
 
 if __name__ == "__main__":

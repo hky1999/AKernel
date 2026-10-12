@@ -91,7 +91,13 @@ The scheduler development profile is documented in
 It consumes frozen artifacts through `builder/scheduler-dev.Dockerfile` and
 starts a separate, bounded container using `scheduler-dev.py`. Preserve its
 private network, cgroup namespace, loopback-only ports, immutable image identity,
-and persistent state. Its capacity file expires after one day. Do not treat
+and persistent state. Its entrypoint renews a fixed capacity observation every
+10 seconds only while the original cgroup and state directories, resource
+limits, service reserve and disk headroom verify. The observation expires
+after 60 seconds without renewal; a rejected renewal does not stop existing
+executions or clear state. Keep the exclusive capacity-provider lock and
+atomic file publication. Run the focused capacity tests before changing this
+path. Do not treat
 this profile as dynamic-resource or oversubscription acceptance.
 
 Interactive deployment helpers write local state under `.akernel/default/` by
