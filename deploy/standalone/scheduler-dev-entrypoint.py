@@ -21,13 +21,36 @@ CAPACITY_VALID_SECONDS = 60
 CAPACITY_REFRESH_SECONDS = 10
 
 
+def fixed_capacity():
+    """返回本实验明确预留的容量，不使用主机瞬时空闲量。"""
+    return {"cpu_millis": 3000, "memory_bytes": 12 * 1024**3,
+            "disk_bytes": 16 * 1024**3}
+
+
+def configure_host_budget(expanded):
+    """为展开后的单节点配置绑定独立持久宿主预算。"""
+    coordinators = [service for service in expanded["services"]
+                    if service["role"] == "coordinator"]
+    nodes = [service["config"].get("node_id") for service in expanded["services"]
+             if service["role"] == "adxlet"]
+    if len(coordinators) != 1 or len(nodes) != 1:
+        raise RuntimeError("本开发模板要求恰好一个 Coordinator 和一个节点")
+    node = nodes[0]
+    if not isinstance(node, str) or not node or node.strip() != node or "${" in node:
+        raise RuntimeError("宿主预算需要展开后的明确节点身份")
+    budget = {"BareMetal1": {"capacity": fixed_capacity(), "nodes": nodes}}
+    config = coordinators[0]["config"]
+    if "host_budgets" in config and config["host_budgets"] != budget:
+        raise RuntimeError("展开配置已有不同的宿主预算")
+    config["host_budgets"] = budget
+
+
 def write_capacity(adx, owned_lock=None):
     """Publish the fixed experiment allocation without exposing a partial file."""
     if (adx / "capacity.json").is_symlink():
         raise RuntimeError("容量文件不能是软链接")
     capacity = {
-        "capacity": {"cpu_millis": 3000, "memory_bytes": 12 * 1024**3,
-                     "disk_bytes": 16 * 1024**3},
+        "capacity": fixed_capacity(),
         "devices": [],
         "valid_until_unix_seconds": int(time.time()) + CAPACITY_VALID_SECONDS,
     }
@@ -157,7 +180,7 @@ def prepare_config(templates=Path("/etc/akernel/dev-templates"),
         with os.fdopen(fd, "w") as stream:
             stream.write(secrets.token_urlsafe(48) + "\n")
     key.chmod(0o600)
-    # 预留 4 GiB 给控制服务、运行时及缓存；容量只由这一节点通告一次。
+    # 预留 4 GiB 给控制服务、运行时及缓存；节点观测与持久宿主预算分开。
     write_capacity(adx)
     deployment = {
         "schema_version": 1, "profile": "standalone", "internal_security": "network",
@@ -183,6 +206,7 @@ def prepare_config(templates=Path("/etc/akernel/dev-templates"),
     # disk_path、valid_for_seconds 留进拒绝额外字段的 file 配置。
     expanded = yaml.safe_load(subprocess.check_output(
         [adxctl, "--config", str(output), "config", "dump"], text=True))
+    configure_host_budget(expanded)
     for service in expanded["services"]:
         if service["role"] == "adxlet":
             service["config"]["resource_source"] = {

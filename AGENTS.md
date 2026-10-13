@@ -96,8 +96,11 @@ and persistent state. Its entrypoint renews a fixed capacity observation every
 limits, service reserve and disk headroom verify. The observation expires
 after 60 seconds without renewal; a rejected renewal does not stop existing
 executions or clear state. Keep the exclusive capacity-provider lock and
-atomic file publication. Run the focused capacity tests before changing this
-path. Do not treat
+atomic file publication.
+展开后的 Coordinator 配置使用 `host_budgets.BareMetal1` 持久保存同一固定容量和实际节点 ID。
+模板只允许一个 Coordinator 和一个节点；不能从节点标签或主机瞬时空闲量生成容量。
+节点观测过期仅关闭新准入，不删除持久占用。匹配的 agent-dx 必须支持宿主预算配置；
+变更既有容量或归属需要独立迁移，不能靠重启覆盖。修改此路径前运行容量专项。 Do not treat
 this profile as dynamic-resource or oversubscription acceptance.
 
 Interactive deployment helpers write local state under `.akernel/default/` by

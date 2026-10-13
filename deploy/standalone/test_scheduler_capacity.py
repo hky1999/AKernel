@@ -98,5 +98,58 @@ class FixedCapacityLeaseTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
 
 
+class HostBudgetConfigurationTest(unittest.TestCase):
+    def test_budget_binding_rejects_ambiguous_identity_and_configuration(self):
+        def expanded(node):
+            return {"services": [
+                {"role": "coordinator", "config": {}},
+                {"role": "adxlet", "config": {"node_id": node}},
+            ]}
+        for node in (None, "", " node ", "${ADX_NODE_ID}"):
+            with self.subTest(node=node), self.assertRaises(RuntimeError):
+                entrypoint.configure_host_budget(expanded(node))
+        for role in ("coordinator", "adxlet"):
+            value = expanded("node")
+            value["services"].append({"role": role, "config": {"node_id": "another"}})
+            with self.subTest(role=role), self.assertRaises(RuntimeError):
+                entrypoint.configure_host_budget(value)
+        value = expanded("node")
+        value["services"][0]["config"]["host_budgets"] = {"other-host": {}}
+        with self.assertRaises(RuntimeError):
+            entrypoint.configure_host_budget(value)
+        self.assertEqual(value["services"][0]["config"]["host_budgets"], {"other-host": {}})
+        value = expanded("node")
+        entrypoint.configure_host_budget(value)
+        original = json.dumps(value, sort_keys=True)
+        entrypoint.configure_host_budget(value)
+        self.assertEqual(json.dumps(value, sort_keys=True), original)
+
+    def test_prepared_config_binds_fixed_budget_to_expanded_node_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            state.mkdir()
+            output = Path(temporary) / "deployment.json"
+            expanded = {
+                "services": [
+                    {"role": "coordinator", "config": {}},
+                    {"role": "adxlet", "config": {"node_id": "operator-selected-node"}},
+                ]
+            }
+            with patch.object(entrypoint, "STATE", state), \
+                    patch.object(entrypoint.subprocess, "check_output", return_value=json.dumps(expanded)), \
+                    patch.object(entrypoint.subprocess, "run") as validate:
+                entrypoint.prepare_config(Path(__file__).parent / "config", output, "adxctl-test")
+            prepared = json.loads(output.read_text())
+            coordinator = prepared["services"][0]["config"]
+            observed = json.loads((state / "adx/capacity.json").read_text())
+            self.assertEqual(coordinator.get("host_budgets"), {
+                "BareMetal1": {"capacity": observed["capacity"], "nodes": ["operator-selected-node"]}
+            })
+            self.assertEqual(observed["capacity"], {
+                "cpu_millis": 3000, "memory_bytes": 12 * 1024**3, "disk_bytes": 16 * 1024**3
+            })
+            validate.assert_called_once_with(["adxctl-test", "--config", str(output), "validate"], check=True)
+
+
 if __name__ == "__main__":
     unittest.main()
