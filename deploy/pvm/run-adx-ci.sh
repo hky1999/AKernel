@@ -103,6 +103,8 @@ assert text.count(old)==1
 text=text.replace(old,'resolv_conf_path="/home/akernel/sandboxd/config/pvm-ci-resolv.conf"')
 text=text.replace('filestore_dir_size="50G"','filestore_dir_size=""')
 text=text.replace('filestore_xfs_enabled=false','filestore_xfs_enabled=true')
+# This dedicated PVM qualification does not initialize unrelated runtimes.
+text='\n'.join(line for line in text.splitlines() if not line.startswith('runsc='))+'\n'
 p.write_text(text)
 RESOLVER
 python3 deploy/pvm/dns-fixture.py > "${out}/dns-fixture.log" 2>&1 &
@@ -122,35 +124,38 @@ export AKERNEL_TEST_CHECKPOINT_MEMORY_MIB=2048
 python3 - "$out" <<'SETTINGS'
 import json,sys
 from pathlib import Path
-(Path(sys.argv[1])/'qualification-settings.json').write_text(json.dumps({'runtime':'firecracker-pvm','checkpoint_memory_mib':2048,'other_sdk_memory_mib':2048,'checkpoint_snapshot_type':'Full (requested explicitly by ADX)','debugctl_applied':False,'large_full_reload_qualified':False},indent=2))
+(Path(sys.argv[1])/'qualification-settings.json').write_text(json.dumps({'runtime':'firecracker-pvm','checkpoint_memory_mib':2048,'other_sdk_memory_mib':2048,'checkpoint_snapshot_type':'Full (requested explicitly by ADX)','debugctl_applied':False,'dedicated_pvm_profile':True},indent=2))
 SETTINGS
 export PYTHONPATH="${root}/sdk/python"
 export AKERNEL_TEST_IMAGE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["oci"])' "$fixtures")
 export AKERNEL_TEST_HTTP_IMAGE="$AKERNEL_TEST_IMAGE"
 export AKERNEL_TEST_NETWORK_URL=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["network_url"])' "$fixtures")
 cd sdk/python
-python -m tests.e2e.run --level standalone --output "${out}/adx-standalone" --budget-seconds 7200
-python3 - "$out/adx-standalone/summary.json" <<'COVERAGE'
+qualification_failed=0
+if ! python -m tests.e2e.run --level standalone --output "${out}/adx-standalone" --budget-seconds 7200; then qualification_failed=1; fi
+if ! python3 - "$out/adx-standalone/summary.json" <<'COVERAGE'
 import json,sys
 summary=json.load(open(sys.argv[1]))
 assert summary['results'] and all(r['status']=='passed' and not r.get('skipped_tests') for r in summary['results']), [(r['name'],r['status']) for r in summary['results']]
 COVERAGE
+then qualification_failed=1; fi
 nydus=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["nydus"])' "$fixtures")
-AKERNEL_TEST_IMAGE="$nydus" AKERNEL_TEST_INTEGRATION_IMAGE="$nydus" \
+if ! AKERNEL_TEST_IMAGE="$nydus" AKERNEL_TEST_INTEGRATION_IMAGE="$nydus" \
   python -m tests.e2e.run --level standalone --case runtime-integration \
-    --output "${out}/adx-nydus" --budget-seconds 1800
-python3 - "$out/adx-nydus/summary.json" <<'NYDUS_COVERAGE'
+    --output "${out}/adx-nydus" --budget-seconds 1800; then qualification_failed=1; fi
+if ! python3 - "$out/adx-nydus/summary.json" <<'NYDUS_COVERAGE'
 import json,sys
 summary=json.load(open(sys.argv[1]));assert summary['results'] and all(r['status']=='passed' and not r.get('skipped_tests') for r in summary['results'])
 NYDUS_COVERAGE
+then qualification_failed=1; fi
 for kind in oci nydus; do
   image=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$fixtures" "$kind")
-  python benchmarks/sandbox_pressure.py --runtime firecracker-pvm --image "$image" \
+  if ! python benchmarks/sandbox_pressure.py --runtime firecracker-pvm --image "$image" \
     --processes 2 --threads 2 --duration 60 --cpu 500 --cpu-limit 0 \
-    --memory 512 --mem-limit 0 --output "${out}/pressure-${kind}.json"
+    --memory 512 --mem-limit 0 --output "${out}/pressure-${kind}.json"; then qualification_failed=1; fi
 done
 
-python3 - "$out" <<'PRESSURE_COVERAGE'
+if ! python3 - "$out" <<'PRESSURE_COVERAGE'
 import json,sys
 from pathlib import Path
 for kind in ('oci','nydus'):
@@ -158,6 +163,7 @@ for kind in ('oci','nydus'):
  assert report['status']=='passed' and report['succeeded']>0 and report['failed']==0, report
  assert report['succeeded']==report['attempted']
 PRESSURE_COVERAGE
+then qualification_failed=1; fi
 # Both control-plane and runtime inventories must drain before module teardown.
 for attempt in {1..30}; do
   python -m akernel_sdk.cli list --quiet > "${out}/control-inventory.txt"
@@ -171,3 +177,5 @@ for attempt in {1..30}; do
 done
 dmesg > "${out}/l1-dmesg.log"
 if grep -E 'BUG:|Oops|WARNING:|general protection' "${out}/l1-dmesg.log"; then exit 1; fi
+
+exit "${qualification_failed}"
