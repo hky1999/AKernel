@@ -4,12 +4,6 @@
 sandboxes. Applications use one stable API for commands, files, interactive
 PTYs, port forwarding, and reverse tunnels.
 
-It supports two backends:
-
-- `openyuanrong-sandbox` (default), using a RESTful API and Rust runtime.
-- `openyuanrong-sdk` (deprecated compatibility backend), using YuanRong actors
-  and a Python runtime.
-
 ## Navigation
 
 - [AKernel Python SDK](#akernel-python-sdk)
@@ -46,7 +40,13 @@ To install from source:
 python -m pip install ./sdk/python
 ```
 
-Configure the public AKernel entrypoint and a signed JWT token:
+Source installs, CI, and AKernel SDK releases resolve the declared
+`adx-sandbox==0.1.0rc2` dependency from the configured Python package index.
+The dependency version is maintained in `pyproject.toml`. CI validates wheel
+and source distribution installs in separate clean environments, including
+`pip check`, imports, version checks, and the `ak` CLI.
+
+Configure the public AKernel entrypoint and the deployment token:
 
 ```bash
 export AKERNEL_SERVER_ADDRESS="akernel.example.com"
@@ -57,21 +57,12 @@ Address behavior is deterministic:
 
 - A host or IP without a port uses HTTPS/WSS on 443 for the frontend and HTTP
   on 80 for public sandbox port URLs.
-- `host:port` uses that port as a shared HTTPS/WSS endpoint.
+- `host:port` preserves shared-port behavior: control uses HTTPS/WSS and
+  public sandbox URLs use HTTP/WS on that explicit port.
 - `AKERNEL_GATEWAY_ADDRESS` overrides only the port-forwarding and reverse
-  tunnel gateway for standalone or custom topologies. An override without a
-  scheme uses HTTP/WS. Exec and file transfer continue to use
+  tunnel data endpoint for nonstandard ports or TLS gateways. An override
+  without a scheme uses HTTP/WS. Exec and file transfer continue to use
   `AKERNEL_SERVER_ADDRESS`.
-
-The actor-based `openyuanrong-sdk` backend is deprecated and retained only for
-compatibility with existing applications. New applications should use
-`openyuanrong-sandbox`. If compatibility requires the actor backend, install
-and select it before importing `akernel_sdk`:
-
-```bash
-pip install "akernel-sdk[openyuanrong-sdk]"
-export AKERNEL_BACKEND=openyuanrong-sdk
-```
 
 ## Create a sandbox
 
@@ -246,7 +237,7 @@ with Sandbox() as sandbox:
 
 The desired policy survives sandboxd restarts, explicit reloads, and same-node
 failover. Dynamic replacement is supported by the default
-`openyuanrong-sandbox` backend; the actor-based backend rejects it explicitly.
+bundled backend.
 
 For independent ingress and egress defaults, deny rules, sandbox-side port
 ranges, DNS allowlists, or stateless matching, construct the schema v2 model
@@ -378,11 +369,16 @@ Foreground commands return a backend-neutral `CommandResult`. Background
 commands return an AKernel `CommandHandle`; its lifecycle operations are
 delegated to the selected backend.
 
-With the default `openyuanrong-sandbox` backend, `handle.wait(timeout)` returns
+With the ADX backend, `handle.wait(timeout)` returns
 `CommandResult(exit_code=None, status="RUNNING", error_code="WAIT_TIMEOUT")`
 when the wait deadline expires. The command keeps running; a later `wait()` can
 observe its completion. `handle.kill()` and `sandbox.commands.kill(pid)` return
 `False` when the command does not exist or has already finished.
+
+PTY session wrappers are not retained by the factory after the caller releases
+them. A successful `wait()` also removes the completed session from its tracked
+sessions. A wait timeout keeps the session active; use `close()` or a context
+manager to terminate an interactive session explicitly.
 
 ## Filesystem
 
@@ -452,7 +448,7 @@ with Sandbox(port_forwardings=[8080]) as sandbox:
 ```
 
 `get_port_url()` rejects undeclared ports. Pass `internal=True` only when a
-deployment operator explicitly wants the direct Traefik address instead of the
+deployment operator explicitly wants the direct ADX Ingress address instead of the
 public gateway.
 
 ## Local failover and reload
@@ -463,11 +459,14 @@ rollback explicitly. It returns `False` whenever the rollback is not completed,
 including when no usable local anonymous checkpoint exists, the sandbox is
 already closed, or the backend reports an operational failure. A successful
 reload preserves `sandbox.id` and the existing commands, filesystem, and PTY
-facades.
+facades. The SDK also confirms the data route with a read-only process
+listing before reporting success. A temporary route conflict is retried within
+a 10-second window; it never reissues the rollback. Other errors, explicit
+non-retryable errors, or an expired wait return `False`.
 
 Recovery points are local and follow the source sandbox lifecycle. They are
-created by sandbox workloads through RRT's internal `POST /checkpoint`
-endpoint on `/run/akernel/rrt.sock`. A successful request returns
+created by sandbox workloads through Execd's internal `POST /checkpoint`
+endpoint on `/run/akernel/execd.sock`. A successful request returns
 `{"status":"completed"}`; a concurrent checkpoint request returns HTTP 409.
 This Unix-socket protocol is experimental and is not a stable public AKernel
 SDK interface. The SDK deliberately does not expose checkpoint identifiers,
@@ -483,8 +482,7 @@ AKERNEL_TEST_RUNTIME=runsc python examples/failover_reload.py
 ```
 
 See [`examples/failover_reload.py`](./examples/failover_reload.py) for the
-internal trigger used during integration. The actor-based
-`openyuanrong-sdk` backend does not support failover or reload.
+internal trigger used during integration.
 
 ## Reverse tunnels
 
@@ -507,7 +505,7 @@ with Sandbox(reverse_tunnel=tunnel) as sandbox:
     )
 ```
 
-`reverse_port` carries the WebSocket tunnel through Traefik. `listen_port` is
+`reverse_port` carries the WebSocket tunnel through ADX Ingress. `listen_port` is
 the loopback HTTP listener used inside the sandbox. Consequently,
 `sandbox.reverse_tunnel.url` is always
 `http://127.0.0.1:<listen_port>`, even when `target` uses HTTPS.
@@ -517,7 +515,7 @@ certificate verification. The sandbox application talks only to its loopback
 HTTP listener. AKernel supports one HTTP/HTTPS reverse tunnel per sandbox and
 does not expose a general TCP tunnel.
 
-The default `openyuanrong-sandbox` backend supports custom internal tunnel
+The bundled backend supports custom internal tunnel
 ports. Its frontend derives the WebSocket port from the HTTP listener, so
 `reverse_port` must equal `listen_port - 1`. Both ports are reserved inside
 that sandbox while the tunnel is active and must not also appear in
@@ -705,6 +703,19 @@ ak delete <sandbox-id> [<sandbox-id> ...]
 
 It uses the same `AKERNEL_SERVER_ADDRESS` and `AKERNEL_TOKEN` environment as
 the Python API.
+
+`ak list` displays `ID`, `TENANT`, and `STATUS`. Administrator keys can see
+instances across tenants; tenant keys only see their own instances. `ak list
+--quiet` still prints only IDs. A server that omits `tenant_id` is displayed
+with `-` in the tenant column; the CLI does not guess the owner.
+
+`ak resources` displays per-node CPU, memory, disk, and accelerator resources.
+`DISK` is scheduling capacity, `DISK ALLOC` is allocated capacity, and
+`DISK%` is the allocated fraction. Disk values use GiB (`G`) after converting the API's MiB values.
+The cluster summary totals disk capacity and allocation.
+CPU/MEM used values and disk allocation describe the scheduling ledger, not
+measured process usage or filesystem occupancy. Missing disk values are
+shown as `-` and excluded from disk totals.
 
 ## Examples and tests
 

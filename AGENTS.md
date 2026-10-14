@@ -6,7 +6,20 @@ project guidance.
 
 ## Project Overview
 
-AKernel provides standalone and cluster-backed sandbox environments for agents and developer workflows. The current public user-facing surface is the Python `akernel-sdk`, including the `akernel_sdk.Sandbox` API and the `ak` CLI. The default sandbox runtime is gVisor runsc. Runtime identifiers and generic JSON-compatible runtime configuration are forwarded to the selected backend, which owns availability and compatibility checks. The bundled deployment also advertises Kata Containers and Firecracker on KVM-capable nodes. The native Linux runc payload is build-time optional and must be explicitly included and enabled by an operator. Creation-time network policies and atomic runtime replacement support unrestricted networking, blocking new flows except the YuanRong control and published sandbox-port routes, or denying exact and leading-wildcard DNS names. Experimental whole-device NVIDIA GPU requests require runsc. Configurable writable-storage requests are supported by runsc and Firecracker.
+AKernel provides standalone and cluster-backed remote sandbox environments for agents and
+developer workflows. The current public user-facing surface is the Python
+`akernel-sdk`, including the `akernel_sdk.Sandbox` API and the `ak` CLI.
+The default sandbox runtime is gVisor runsc. Runtime identifiers and generic
+JSON-compatible runtime configuration are forwarded to the selected backend,
+which owns availability and compatibility checks. The bundled deployment also
+advertises Kata Containers and Firecracker on KVM-capable nodes. The native
+Linux runc payload is build-time optional and must be explicitly included and
+enabled by an operator.
+Creation-time network policies and atomic runtime replacement support
+unrestricted networking, blocking new flows except the control-plane and
+published sandbox-port routes, or denying exact and leading-wildcard DNS names.
+Experimental whole-device NVIDIA GPU requests require runsc. Configurable
+writable-storage requests are supported by runsc and Firecracker.
 
 Use AKernel when a task needs an isolated remote environment with command
 execution, file operations, interactive PTYs, port forwarding, or reverse
@@ -24,13 +37,14 @@ tunnels. The project overview and deployment quick start are in
   Dockerfile direct-launch configuration, independent of the parser and backend.
 - `sdk/python/examples/` - maintained AKernel SDK examples.
 - `sdk/python/tests/` - maintained AKernel SDK tests.
-- `src/yuanrong/` - pinned openYuanRong mirror checkout, including its
-  recursive component submodules.
+- `sdk/python/benchmarks/` - source-run end-to-end performance, pressure, and
+  mixed-load drivers; their driver tests run with `make sdk-test`.
 - `builder/` - Dockerfiles, service configs, runtime rootfs build, and image
   entrypoint scripts for the public all-in-one image.
 - `deploy/` - Helm charts, standalone scripts, Terraform modules, and deployment helper scripts.
 - `deploy/standalone/manage.py` - source-build standalone lifecycle shared by Linux and Apple Silicon Mac with OrbStack.
 - `assets/` - static images used by the root README.
+- `src/agent-dx/` - Agent DX source pinned to the upstream release commit by a Git submodule.
 
 The open-source AKernel repository contains the SDK, deployment configuration,
 build tooling, and examples. Node runtime components such as `sandboxd` and
@@ -40,6 +54,9 @@ checksum-pinned static distill-fs release recorded in
 `builder/distill-fs-versions.env`. The distill-fs submodule is an optional
 source reference, not a build input. See the Build section below for runtime
 payloads.
+
+ADX platform and Execd binaries come from the release archives pinned in the
+Dockerfiles; `src/agent-dx/` provides the tagged source for inspection.
 
 ## Common Commands
 
@@ -56,7 +73,7 @@ make standalone-stop
 make push
 make plan
 make deploy
-make token TTL=24h
+make token
 make print-env
 make sdk-test
 make deploy-script-check
@@ -83,23 +100,22 @@ profiles. These directories are intentionally ignored by Git. They may contain:
 
 - generated Terraform variables
 - kubeconfig files and paths
-- IAM signing seeds
-- generated JWT tokens
+- public HTTPS certificate material
+- bootstrap API keys
 - SDK environment exports
 
-The source standalone entry point uses `.akernel/standalone/data/` by default, or an absolute `AKERNEL_STANDALONE_DATA_DIR`. It keeps generated runtime configuration, the signing seed, token, `source-state.json`, and `sdk-env.sh` together in that directory. The environment file reads the protected token file when sourced; lifecycle commands print credential paths without their values. This local profile is independent of cloud `ENV` profiles.
+The source standalone entry point uses `.akernel/standalone/data/` by default, or an absolute `AKERNEL_STANDALONE_DATA_DIR`. It keeps generated runtime configuration, the bootstrap API key, token, `source-state.json`, and `sdk-env.sh` together in that directory. The environment file reads the protected token file when sourced; lifecycle commands print credential paths without their values. This local profile is independent of cloud `ENV` profiles.
 
 Never commit `.akernel/`, Terraform state, kubeconfigs, tokens, signing seeds, cloud credentials, private registry URLs, or local debug artifacts.
 
 ## Build
 
 AKernel uses Docker for building. The public distribution ships one all-in-one
-image that can run as master, frontend, node, or standalone depending on the
-deployment entrypoint and environment.
+image that can run the ADX control role, node role, or standalone topology
+depending on the deployment entrypoint and environment.
 
 ```bash
 make build
-make build RUNTIME_PROFILE=python
 make build AKERNEL_ENABLE_RUNC=true
 make build AKERNEL_ENABLE_FIRECRACKER=false
 ```
@@ -111,18 +127,10 @@ The build creates only the selected image reference; it does not add a second
 `akernel-all-in-one` alias. `make push` pushes that selected reference directly.
 
 The build helper performs two Docker builds. `builder/runtime.Dockerfile`
-creates `yr-runtime-rootfs.img`; the default `rrt` profile contains the
-pinned openYuanRong RRT binary without Python. Set
-`RUNTIME_PROFILE=python` to include the optional Python 3.10 through 3.14
-runtimes and `openyuanrong_sdk`. `builder/node.Dockerfile` then compiles the
-node components and produces the AKernel all-in-one image using the selected
-runtime image and its matching service configuration.
-
-The control-plane and RRT release version is independent of the optional
-actor-based `openyuanrong_sdk` installed in the Python runtime profile. This
-actor backend is deprecated and retained only for compatibility with existing
-applications. Keep it on its explicitly pinned legacy version; do not advance
-it with the default `openyuanrong-sandbox` backend or use it for new features.
+creates the EXECD-only `akernel-runtime-rootfs.img` from the pinned ADX release.
+`builder/node.Dockerfile` then compiles the node components and produces the
+AKernel all-in-one image using that runtime image. The actor-based Python
+runtime is not a build input.
 
 Initialize sandboxd with `git submodule update --init src/sandboxd` before
 building. The all-in-one image builds the sandboxd binaries, including
@@ -139,15 +147,15 @@ also excludes virtiofsd.
 
 The sandboxd submodule's runtime manifest is the source of truth for the gVisor, runc, and Firecracker releases used by both sandboxd E2E and AKernel packaging. Test an unreleased runtime by checking out the sandboxd commit that pins it rather than overriding manifest fields from the AKernel build. Keep sandboxd's pooled-TAP contract and the matching gVisor compatibility patches validated together when upgrading.
 
-Native Linux/arm64 builds support the `rrt` runtime profile with runsc and optional runc. Set `AKERNEL_TARGETARCH=arm64`, `AKERNEL_ENABLE_KATA=false`, and `AKERNEL_ENABLE_FIRECRACKER=false`; use `AKERNEL_ENABLE_RUNC=true` to include runc. ARM64 rejects the Python profile, VM payloads, and NVIDIA GPU requests. Builds require Docker BuildKit. The target precedence is explicit `AKERNEL_TARGETARCH`, then a supported single-platform `DOCKER_DEFAULT_PLATFORM`, then the stable `amd64` default; never infer the builder's architecture from the Docker client's host. Explicit runtime flags override the selected deployment profile, which overrides defaults. Validate the merged flags, release pins, and URL/checksum override pairs before either Docker build.
+Native Linux/arm64 builds support the `execd` runtime profile with runsc and optional runc. Set `AKERNEL_TARGETARCH=arm64`, `AKERNEL_ENABLE_KATA=false`, and `AKERNEL_ENABLE_FIRECRACKER=false`; use `AKERNEL_ENABLE_RUNC=true` to include runc. ARM64 requires explicit ADX platform and Execd archive URL/checksum pairs matching its architecture, and rejects VM payloads and NVIDIA GPU requests. Builds require Docker BuildKit. The target precedence is explicit `AKERNEL_TARGETARCH`, then a supported single-platform `DOCKER_DEFAULT_PLATFORM`, then the stable `amd64` default; never infer the builder's architecture from the Docker client's host. Explicit runtime flags override the selected deployment profile, which overrides defaults. Validate the merged flags, release pins, and URL/checksum override pairs before either Docker build.
 
-The build selects architecture-matched gVisor and runc pins from the sandboxd manifest and distill-fs pins from `builder/distill-fs-versions.env`, explicitly sets both Docker build platforms, and passes the target architecture to sandboxd compilation. Check downloaded executable ELF headers against the target architecture with `builder/scripts/verify-elf-arch.sh`; checksum verification, manifest claims, or successful execution under emulation do not establish architecture. Keep the RRT release's AMD64 and ARM64 checksums synchronized with `OPEN_YR_VERSION`, and the collector archive checksums synchronized with `OTELCOL_CONTRIB_VERSION`. Collector URL overrides require a matching checksum. `make build-helper-test` covers build arguments and ELF validation without Docker builds.
+The build selects architecture-matched gVisor and runc pins from the sandboxd manifest and distill-fs pins from `builder/distill-fs-versions.env`, explicitly sets both Docker build platforms, and passes the target architecture to sandboxd compilation. Check downloaded executable ELF headers against the target architecture with `builder/scripts/verify-elf-arch.sh`; checksum verification, manifest claims, or successful execution under emulation do not establish architecture. Keep the ADX platform and Execd archives from the same release, and the collector archive checksums synchronized with `OTELCOL_CONTRIB_VERSION`. Collector URL overrides require a matching checksum. `make build-helper-test` covers build arguments and ELF validation without Docker builds.
 
 Keep official build-download sources as the default and mirror/proxy selection explicit. Preserve third-party repository URLs, release pins, signing keys, checksums, and TLS verification. Forward proxy credentials only through Docker's predefined build arguments by name, without exposing or persisting values. The [build download guide](builder/README.md) owns mirror scope, override precedence, proxy/network options, and release URL/checksum pairs; update it when changing those interfaces.
 
 PVM is an experimental opt-in node profile. Standalone selects `AKERNEL_FIRECRACKER_BACKEND=pvm`; Helm selects `node.config.sandboxd.firecrackerBackend=pvm`. This selects `firecracker-pvm`, removes Kata from that profile, and requires the validated PVM guest bundle and matched OOT host `kvm.ko`/`kvm-pvm.ko` modules. `deploy/pvm/oot-host.env` separately pins the source, generic OOT baseline and target patch profile. Prepare that profile into a fresh export, verify the exact host inputs and build against the existing distribution kernel; do not build or replace the host kernel. The host-only OOT source and PVM guest source are distinct. VMX/SVM is unnecessary on the host/L1, but the other CPU features, supported boot settings and module-loading policy still apply. Sandboxd verifies the actual backend before advertising it. Keep default KVM behavior unchanged; see `deploy/pvm-runtime.md` for module preparation, placement, restore and rollout boundaries.
 
-PVM development currently targets the `hky1999/AKernel` and `hky1999/sandboxd` forks. Keep the sandboxd submodule URL and gitlink consistent. The OOT host profile includes the upstream OSPKE guard fix; guest TSC changes and the optional DEBUGCTL optimization remain separate. Same-host/L1-boot restore is the current boundary, and existing hardware-KVM CI does not qualify PVM. See `deploy/pvm-runtime.md` before changing guest pins or CI.
+PVM development currently targets the `hky1999/AKernel` and `hky1999/sandboxd` forks. Keep the sandboxd submodule URL and gitlink consistent. The OOT host profile includes the upstream OSPKE guard fix; guest TSC changes and the optional DEBUGCTL optimization remain separate. The opt-in PVM candidate is independently pinned by sandboxd and consumed without changing ordinary KVM releases. Strict TSC improves POSIX clock/timer recovery, but raw-TSC continuity and heterogeneous migration remain unqualified. The independent PVM workflow requires a bounded disposable L1; ordinary hardware-KVM CI does not qualify PVM. See `deploy/pvm-runtime.md` before changing guest pins or CI.
 
 Install the complete checksum-pinned gVisor release archive with sandboxd's
 `third_party/install-gvisor.sh`. Preserve runsc, the containerd shim, and all
@@ -206,6 +214,20 @@ and standalone launcher: without container detection, privileged systemd
 shutdown can remount shared host filesystems read-only. See
 [`deploy/README.md#systemd-container-identity`](./deploy/README.md#systemd-container-identity)
 for deployment implications.
+
+ADX's systemd launcher imports the selected ADX configuration, Redis address,
+and node identity from the container PID 1 environment. Explicit systemd service
+environment overrides take precedence. Preserve this handoff when changing
+node deployment: otherwise the service can fall back to standalone configuration
+even though the Pod declares a node configuration.
+
+The managed Kubernetes Redis uses its own Helm-generated authentication Secret,
+preserved by live lookup during upgrades. Its NetworkPolicy is additional
+isolation and requires CNI enforcement. Coordinator and Ingress/API Server run in separate
+Deployments with independent `adxctl` supervisors and health probes. Their
+generated state is container-local, while Redis persists authoritative state.
+Adxlet uses its own state subtree under `/home/akernel/adx/run/node`;
+never start Coordinator, Ingress/API Server, or Redis in a node Pod.
 
 Aliyun's aggregate Pod PID budget is configurable independently of the
 per-sandbox limit; see `deploy/terraform/aliyun/README.md#pod-pid-budget`.
@@ -288,14 +310,12 @@ pinned public chart and, by default, creates three seed nodes and one server
 node in dedicated pools. Review the generated Terraform plan and expected cost
 before applying it.
 
-The deployment helper generates a stable IAM signing seed for the environment
-and passes it to the Helm chart through Terraform. This allows JWT tokens to be
-generated locally without exposing the IAM token API publicly.
+The deployment helper creates an HTTPS and API key Secret before Helm install.
+It retains an existing Secret so certificates and the bootstrap administrator
+API key stay stable across updates.
 
 If `.akernel/default/` already exists, `make config` asks before overwriting
-`config.env` and `terraform.tfvars`. The existing `iam-seed` is reused unless
-you delete it or explicitly provide `IAM_SEED_HEX`, so previously generated
-tokens normally remain compatible.
+`config.env` and `terraform.tfvars`.
 
 For agent/non-interactive deployment setup, do not rely on prompts. Pass config
 values explicitly and use a named environment to avoid overwriting a user's
@@ -320,28 +340,24 @@ make plan ENV="${ENV_NAME}"
 Inspect an existing profile before reusing its name. Add `FORCE=1` only when
 the user has explicitly approved overwriting its generated configuration.
 
-## JWT Tokens
+## Agent DX API Key
 
-Generate SDK tokens locally with:
+Read the deployed bootstrap administrator API key with:
 
 ```bash
-make token TTL=24h
-make token TTL=100y
-make token TTL=never
+make token
+make print-env
 ```
 
-`make token` and `make print-env` print JWT credentials. Treat their output as
-a secret: do not include it in logs, commits, or issue reports, and do not
-repeat it in chat unless the user explicitly requests credential handoff.
+`make token` reads `admin-key` from the deployed `akernel-adx-tls` Secret.
+`make print-env` writes mode-0600 `token` and `sdk.env` files under the selected
+deployment profile. Treat their output as a secret: do not include it in logs,
+commits, issue reports, or chat unless the user explicitly requests credential
+handoff.
 
-The token generator intentionally follows openYuanrong's current signed JWT
-format:
-the `LITEBUS_DATA_KEY` hex seed is decoded to bytes, the JWT header and payload
-are signed with HMAC-SHA256, and the hex digest string is base64url encoded.
-
-Long-lived or never-expiring tokens are supported but should not be the default.
-Current signed JWT tokens are stateless; a leaked token cannot be revoked
-individually. Rotate the IAM signing seed to invalidate existing tokens.
+Standalone startup writes its selected SDK addresses to mode-0600
+`deploy/standalone/data/sdk.env`; tests and callers can source this file and
+read `data/token` separately. Keep the selected hostname and both ports aligned.
 
 ## SDK And CLI
 
@@ -370,9 +386,9 @@ with Sandbox(failover=True) as sb:
 ```
 
 The current functional integration deliberately leaves anonymous local
-checkpoint creation inside the workload through RRT's internal Unix socket.
-The node sets `YR_RRT_CONTROL_SOCKET_PATH=/run/akernel`, making the socket
-available at `/run/akernel/rrt.sock`. Do not present that socket protocol as a
+checkpoint creation inside the workload through EXECD's internal Unix socket.
+The node sets `ADX_EXECD_CONTROL_SOCKET_PATH=/run/akernel`, making the socket
+available at `/run/akernel/execd.sock`. Do not present that socket protocol as a
 stable public SDK interface or add public checkpoint catalog methods to the
 SDK.
 
@@ -430,13 +446,13 @@ export AKERNEL_SERVER_ADDRESS="<server_address>"
 export AKERNEL_TOKEN="<your_token>"
 ```
 
-When the public Traefik dual-entrypoint mode is enabled, a host/IP-only
-`AKERNEL_SERVER_ADDRESS` uses HTTPS/WSS on 443 for the frontend API and exec
-websocket, and HTTP on 80 for sandbox port URLs. For standalone deployments,
-use the Traefik container IP printed by `deploy/standalone/start.sh`:
+ADX always keeps two public listeners: HTTPS/WSS control traffic on 443 and
+plain HTTP/WS instance data on 80. API Server and Ingress may share a process, but
+their public ports remain distinct. Standalone publishes both embedded Ingress
+listeners directly from the `akernel-node` container:
 
 ```bash
-export AKERNEL_SERVER_ADDRESS=<traefik-container-ip>
+export AKERNEL_SERVER_ADDRESS=127.0.0.1
 ```
 
 No separate `AKERNEL_GATEWAY_ADDRESS` is required for the default standalone layout. When a custom topology sets it, the override applies only to public sandbox port URLs and reverse tunnels; exec and file transfer continue to use `AKERNEL_SERVER_ADDRESS`. For source standalone, source the generated `sdk-env.sh` from the selected data directory. Direct `start.sh` uses `akerneldev/all-in-one:latest` by default; pass `IMAGE` for a locally built or differently tagged image.
@@ -444,8 +460,8 @@ No separate `AKERNEL_GATEWAY_ADDRESS` is required for the default standalone lay
 Standalone GPU testing additionally requires NVIDIA Container Toolkit on the
 host and `AKERNEL_ENABLE_GPU=true`. sandboxd uses the read-only cgroup
 node-resource provider in standalone mode; Kubernetes deployments retain the
-Kubernetes provider. Standalone explicitly enables local DNAT because the
-frontend shares the node network namespace.
+Kubernetes provider. Standalone explicitly enables local DNAT because Ingress
+shares the node network namespace.
 
 Standalone uses iptables NAT by default. Set `AKERNEL_NAT_BACKEND=bpfnat` to
 use the experimental embedded TC eBPF backend. AKernel prepares the required
@@ -466,11 +482,11 @@ not set a bounded filestore size for this profile because that reintroduces a
 loop-backed filesystem and disables the high-performance Firecracker C/R
 layout.
 
-The bundled node enables YuanRong's local-only sandbox snapshot data plane and
-stores checkpoint state under the persistent `/home/akernel/checkpoints`
-mount. RRT receives
-`YR_RRT_CONTROL_SOCKET_PATH=/run/akernel` so sandbox workloads can trigger
-their local checkpoint handoff through `/run/akernel/rrt.sock`. Recovery points
+The bundled node enables ADX local recovery points and
+stores checkpoint state under the persistent `/home/akernel/adx/checkpoints`
+mount. EXECD receives
+`ADX_EXECD_CONTROL_SOCKET_PATH=/run/akernel` so sandbox workloads can trigger
+their local checkpoint handoff through `/run/akernel/execd.sock`. Recovery points
 follow the source sandbox lifecycle. The public SDK exposes only failover and
 reload, not checkpoint identifiers, restore, list, delete, or snapshot TTLs.
 Keep local-only snapshot mode and the persistent checkpoint directory
@@ -490,17 +506,10 @@ python3 -m pip install -e './sdk/python[dev]'
 make sdk-check
 ```
 
-The Python SDK installs `openyuanrong-sandbox` as its default execution
-backend. The actor-based `openyuanrong-sdk` backend is deprecated and retained
-only for compatibility with existing applications through the
-`openyuanrong-sdk` extra. Do not update its pinned legacy version alongside
-the default backend or extend it with new capabilities. Installing that extra
-leaves both distributions present, so `openyuanrong-sandbox` remains the
-automatic default unless `AKERNEL_BACKEND=openyuanrong-sdk` is set before
-import. Backend selection happens once during import and backend modules are
-loaded lazily on first use. Keep public `Sandbox`, `Commands`, `Filesystem`,
-and value types independent of both native packages; all native conversions
-belong under `akernel_sdk._backends`.
+The Python SDK installs its execution backend automatically. Preserve the
+public `AKERNEL_SERVER_ADDRESS=host[:port]` and `AKERNEL_TOKEN` contract.
+Retired backend selector names map to ADX without installing old dependencies.
+Native conversions remain under `akernel_sdk._backends`.
 
 Keep sandbox cleanup explicit through context managers or `kill()`, with
 observable, retryable deletion failures and workload exceptions preserved on
@@ -533,7 +542,7 @@ are not part of the default test suite.
 ## Release
 
 The CI workflow builds the public Linux/amd64 all-in-one image with only
-gVisor runsc and the `rrt` runtime profile. It explicitly sets
+gVisor runsc and the `execd` runtime profile. It explicitly sets
 `AKERNEL_ENABLE_KATA=false`, `AKERNEL_ENABLE_FIRECRACKER=false`, and
 `AKERNEL_ENABLE_RUNC=false`, excluding VM payloads and virtiofsd. Source-build
 defaults still include Kata and Firecracker for operators who need them.
@@ -580,6 +589,11 @@ the wheel and source distribution, and publishes them through the PyPI trusted
 publisher configured for the `pypi` GitHub environment. Do not add a PyPI
 password or API token to the repository.
 
+Source installation, PR CI, and Python publication install the dependencies
+declared in `sdk/python/pyproject.toml` from the configured package index.
+Keep the ADX SDK version pin in that metadata as the single dependency entry
+point for all three paths.
+
 PR CI and publishing share `.github/actions/python-distributions`, which
 builds the wheel and source distribution and installs each in a separate clean
 environment with its declared dependencies. Keep dependency validation,
@@ -599,6 +613,22 @@ templates, and Python deployment helpers with:
 ```bash
 make deploy-script-check
 ```
+
+For Kubernetes SDK ingress changes, validate the rendered ADX public Service
+and cloud-provider templates:
+
+```bash
+python deploy/akernel/charts/core/tests/test_adx_chart.py -v
+python deploy/terraform/test_adx_contract.py -v
+```
+
+ADX directly terminates HTTPS control/API/PTY on its 8443 listener and exposes
+HTTP sandbox traffic on 8080. Public Services map these to configurable external
+ports (443/80 by default). Preserve both ports and the existing SDK variables.
+Validate real TLS authentication, PTY and HTTP port access with the
+`direct-ingress` standalone E2E group; PR CI discovers this group alongside the
+other standalone tests. Keep ADX public certificates and remove redundant
+external-proxy certificates and cloud-profile settings.
 
 For standalone lifecycle or launch changes, also run the helper tests without starting containers:
 
@@ -664,3 +694,10 @@ SDK control-plane access.
 - Keep unrelated dirty files out of commits, especially local deployment state,
   generated binaries, Terraform state, kubeconfigs, tokens, and private
   registry configuration.
+
+## ADX observability
+
+The node Collector runs inside the existing node container; control-role
+collectors read shared local logs. Keep `builder/config/` and Helm Collector
+configuration synchronized. Preserve the ADX dashboards' UIDs and query
+contracts. Verify real SDK traffic reaches the backends after collection changes.

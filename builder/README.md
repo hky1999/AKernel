@@ -11,9 +11,9 @@ make standalone AKERNEL_BUILD_MIRROR=aliyun
 # The same option applies to make build.
 ```
 
-`AKERNEL_BUILD_MIRROR` accepts `official` (the default) or `aliyun`. The Aliyun preset covers Ubuntu APT, Debian APT in the Go/Rust builder stages, and Python packages in the optional Python runtime profile. Ubuntu ARM64 selects `ubuntu-ports`; AMD64 selects `ubuntu`. APT source rewriting preserves suites, components, signing keys and signature verification, and changes only recognized official repository URIs in `.list` and `.sources` files. Third-party repositories retain their own URLs. Go keeps its official proxy unless the caller explicitly sets `GOPROXY`; module checksum verification stays enabled.
+`AKERNEL_BUILD_MIRROR` accepts `official` (the default) or `aliyun`. The Aliyun preset covers Ubuntu APT, Debian APT in the Go/Rust builder stages. Ubuntu ARM64 selects `ubuntu-ports`; AMD64 selects `ubuntu`. APT source rewriting preserves suites, components, signing keys and signature verification, and changes only recognized official repository URIs in `.list` and `.sources` files. Third-party repositories retain their own URLs. Go keeps its official proxy unless the caller explicitly sets `GOPROXY`; module checksum verification stays enabled.
 
-APT uses the Aliyun HTTP endpoints because minimal Ubuntu images do not yet contain CA certificates; APT still verifies signed repository metadata and package hashes. Python uses HTTPS. An explicit HTTPS APT mirror requires a base image with a populated CA trust store; TLS verification is never disabled. See the official [Ubuntu](https://developer.aliyun.com/mirror/ubuntu), [Ubuntu Ports](https://developer.aliyun.com/mirror/ubuntu-ports), [Debian](https://developer.aliyun.com/mirror/debian), [Debian security](https://developer.aliyun.com/mirror/debian-security), and [PyPI](https://developer.aliyun.com/mirror/pypi) mirror documentation.
+APT uses the Aliyun HTTP endpoints because minimal Ubuntu images do not yet contain CA certificates; APT still verifies signed repository metadata and package hashes. An explicit HTTPS APT mirror requires a base image with a populated CA trust store; TLS verification is never disabled. See the official [Ubuntu](https://developer.aliyun.com/mirror/ubuntu), [Ubuntu Ports](https://developer.aliyun.com/mirror/ubuntu-ports), [Debian](https://developer.aliyun.com/mirror/debian), [Debian security](https://developer.aliyun.com/mirror/debian-security) mirror documentation.
 
 Nonempty caller overrides take precedence over the preset. These public repository URLs are passed as Docker build arguments, so they must not contain credentials, query parameters or fragments:
 
@@ -23,22 +23,23 @@ Nonempty caller overrides take precedence over the preset. These public reposito
 | `AKERNEL_APT_UBUNTU_PORTS_MIRROR` | Ubuntu ARM64 ports repository root |
 | `AKERNEL_APT_DEBIAN_MIRROR` | Debian archive repository root |
 | `AKERNEL_APT_DEBIAN_SECURITY_MIRROR` | Debian security repository root |
-| `PIP_INDEX_URL` | Python profile pip installs, uv package installs and venv seeds |
 | `GOPROXY` | Go module downloads; public URL with optional `,direct`, or `direct`/`off` |
 
-Python and Go repository selections are used only during builds; no mirror environment setting is added to the sandbox runtime. Selected APT repository URLs remain in the built images. Mirrors may lag upstream, and failures remain visible instead of automatically switching sources. Docker base-image pulls, GitHub release assets, GitLab source, Cargo packages, NVIDIA repositories and uv-managed Python interpreter downloads use their existing sources. Docker registry mirrors belong to the daemon configuration.
+Go repository selections are used only during builds; no mirror environment setting is added to the sandbox runtime. Selected APT repository URLs remain in the built images. Mirrors may lag upstream, and failures remain visible instead of automatically switching sources. Docker base-image pulls, GitHub release assets, GitLab source, Cargo packages, NVIDIA repositories use their existing sources. Docker registry mirrors belong to the daemon configuration.
 
 ## Pinned release files
 
-Package mirrors do not serve the large core wheel or other GitHub release files. For an explicitly selected artifact cache or an unreleased build, the helper accepts these URL/checksum pairs:
+Package mirrors do not serve the ADX packages or other release files. For an explicitly selected artifact cache or an unreleased build, the helper accepts these URL/checksum pairs:
 
 | Environment variables | Build stage | Equivalent helper options |
 | :--- | :--- | :--- |
-| `RRT_RUNTIME_URL`, `RRT_RUNTIME_SHA256` | RRT binary | `--rrt-runtime-url`, `--rrt-runtime-sha256` |
-| `OPEN_YR_CORE_WHEEL_URL`, `OPEN_YR_CORE_WHEEL_SHA256` | Control-plane wheel | `--open-yr-core-wheel-url`, `--open-yr-core-wheel-sha256` |
+| `ADX_EXECD_URL`, `ADX_EXECD_SHA256` | Execd archive | `--adx-execd-url`, `--adx-execd-sha256` |
+| `ADX_RELEASE_URL`, `ADX_RELEASE_SHA256` | ADX platform archive | `--adx-release-url`, `--adx-release-sha256` |
 | `OTELCOL_CONTRIB_URL`, `OTELCOL_CONTRIB_SHA256` | OTel collector archive | `--otelcol-contrib-url`, `--otelcol-contrib-sha256` |
 
-Each pair is validated before either image build; downloads retain checksum and native ELF architecture checks. A mirror of the same release must use its existing pinned checksum. Core wheel URLs must retain a valid wheel filename. Runtime versions and gVisor, runc, Firecracker and distill-fs pins continue to come from their existing manifests.
+The default ADX archives are pinned for AMD64. ARM64 builds require both ADX URL/checksum pairs to select packages built for ARM64; an AMD64 archive is rejected by ELF validation.
+
+Each pair is validated before either image build; downloads retain checksum and native ELF architecture checks. A mirror of the same release must use its existing pinned checksum. Runtime versions and gVisor, runc, Firecracker and distill-fs pins continue to come from their existing manifests.
 
 Source version/revision labels and artifact URL overrides are declared near their uses so changing those inputs preserves preceding dependency layers.
 

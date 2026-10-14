@@ -416,34 +416,15 @@ variable "core_namespace" {
   default     = "akernel"
 }
 
-variable "iam_litebus_data_key" {
-  type        = string
-  description = "Hex-encoded IAM JWT signing seed passed to the core chart. Leave empty to let the chart generate or reuse a seed."
-  default     = ""
-  sensitive   = true
-}
-
-variable "etcd_image_repository" {
-  type        = string
-  description = "Image repository for etcd."
-  default     = "public.ecr.aws/bitnami/etcd"
-}
-
-variable "etcd_image_tag" {
-  type        = string
-  description = "Image tag for etcd."
-  default     = "3.6.8"
-}
-
 variable "master_image_repository" {
   type        = string
-  description = "Image repository for akernel-master."
+  description = "Image repository for the control-plane service."
   default     = ""
 }
 
 variable "master_image_tag" {
   type        = string
-  description = "Image tag for akernel-master."
+  description = "Image tag for the control-plane service."
   default     = ""
 }
 
@@ -457,18 +438,6 @@ variable "node_image_tag" {
   type        = string
   description = "Image tag for akernel-node."
   default     = ""
-}
-
-variable "traefik_image_repository" {
-  type        = string
-  description = "Image repository for Traefik."
-  default     = "traefik"
-}
-
-variable "traefik_image_tag" {
-  type        = string
-  description = "Image tag for Traefik."
-  default     = "v3.6.8"
 }
 
 variable "monitor_image_registry" {
@@ -519,34 +488,10 @@ variable "dragonfly_dfinit_image_tag" {
   default     = ""
 }
 
-variable "master_service_type" {
-  type        = string
-  description = "Service type for akernel-master. Use 'LoadBalancer' for public access (CCE auto-creates ELB)."
-  default     = "LoadBalancer"
-}
-
-variable "master_public_access_8888" {
-  type        = bool
-  description = "Whether to expose akernel-master port 8888 to public network via LoadBalancer."
-  default     = false
-}
-
-
-variable "master_service_loadbalancer_ip" {
-  type        = string
-  description = "Optional Service loadBalancerIP (EIP) for akernel-master when master_public_access_8888=true."
-  default     = ""
-}
-
-variable "master_service_annotations" {
-  type        = map(string)
-  description = "Extra annotations for akernel-master Service."
-  default     = {}
-}
 
 variable "master_elb_bandwidth_size" {
   type        = number
-  description = "Bandwidth size (Mbit/s) for auto-created ELB when master_public_access_8888=true."
+  description = "Bandwidth size (Mbit/s) for auto-created public load balancers."
   default     = 5
 }
 
@@ -560,122 +505,6 @@ variable "master_elb_eip_type" {
   type        = string
   description = "EIP type for auto-created ELB."
   default     = "5_bgp"
-}
-
-variable "master_replicas" {
-  type        = number
-  description = "Number of master replicas (for HA when frontend is enabled)."
-  default     = 1
-}
-
-variable "frontend_enabled" {
-  type        = bool
-  description = "Whether to enable frontend Deployment (splits from master for independent scaling)."
-  default     = false
-}
-
-variable "frontend_replicas" {
-  type        = number
-  description = "Number of frontend replicas."
-  default     = 2
-}
-
-variable "frontend_cpu" {
-  type        = string
-  description = "CPU request/limit for frontend pods."
-  default     = "4"
-}
-
-variable "frontend_memory" {
-  type        = string
-  description = "Memory request/limit for frontend pods."
-  default     = "8Gi"
-}
-
-variable "install_traefik" {
-  type        = bool
-  description = "Whether to enable Traefik ingress controller in the core chart."
-  default     = true
-}
-
-variable "traefik_replicas" {
-  type        = number
-  description = "Number of Traefik replicas."
-  default     = 1
-}
-
-variable "traefik_tcp_port" {
-  type        = number
-  description = "TCP port for Traefik websecure entrypoint (legacy single-entrypoint mode; ignored when traefik_enable_web_entrypoint=true)."
-  default     = 8888
-}
-
-variable "traefik_enable_web_entrypoint" {
-  type        = bool
-  description = "Enable dual entrypoints: 'websecure' (TLS, frontend API) on traefik_websecure_port and 'web' (plain HTTP, port forwarding) on traefik_web_port. When false, falls back to legacy single-entrypoint mode using traefik_tcp_port."
-  default     = false
-}
-
-variable "traefik_web_port" {
-  type        = number
-  description = "Port for Traefik 'web' (plain HTTP) entrypoint. Only used when traefik_enable_web_entrypoint=true."
-  default     = 80
-}
-
-variable "traefik_websecure_port" {
-  type        = number
-  description = "Port for Traefik 'websecure' (TLS) entrypoint. Only used when traefik_enable_web_entrypoint=true."
-  default     = 443
-}
-
-variable "traefik_service_type" {
-  type        = string
-  description = "Service type for Traefik. Use 'LoadBalancer' for cloud deployments."
-  default     = "LoadBalancer"
-}
-
-variable "traefik_public_access" {
-  type        = bool
-  description = "Whether Traefik receives a public Huawei Cloud LoadBalancer."
-  default     = true
-}
-
-variable "traefik_tls_enabled" {
-  type        = bool
-  description = "Whether to enable TLS for Traefik."
-  default     = false
-}
-
-variable "traefik_tls_cert" {
-  type        = string
-  description = "TLS certificate content (PEM) for Traefik. Only used when traefik_tls_enabled=true and traefik_tls_create_secret=true."
-  default     = ""
-  sensitive   = true
-}
-
-variable "traefik_tls_key" {
-  type        = string
-  description = "TLS private key content (PEM) for Traefik. Only used when traefik_tls_enabled=true and traefik_tls_create_secret=true."
-  default     = ""
-  sensitive   = true
-}
-
-variable "traefik_tls_create_secret" {
-  type        = bool
-  description = "Whether to create TLS secret from traefik_tls_cert/traefik_tls_key."
-  default     = false
-}
-
-variable "traefik_internal_stats_enabled" {
-  type        = bool
-  description = "Whether to enable the /internal-stats endpoint on Traefik."
-  default     = false
-}
-
-variable "traefik_internal_stats_image" {
-  type        = string
-  description = "BusyBox image for the Traefik /internal-stats sidecar."
-  default     = "busybox:1.37.0-musl"
 }
 
 variable "monitor_namespace" {
@@ -929,7 +758,7 @@ variable "registry_auths" {
 # --- Component resource specifications ---
 
 variable "etcd_resources" {
-  description = "Resource requests/limits and PVC size for etcd."
+  description = "Resource requests/limits and PVC size for managed Redis (retained input name)."
   type = object({
     cpu               = optional(string, "1")
     memory            = optional(string, "2Gi")
@@ -940,7 +769,7 @@ variable "etcd_resources" {
 }
 
 variable "master_resources" {
-  description = "Resource requests/limits for akernel-master."
+  description = "Resource requests/limits for the control-plane service."
   type = object({
     cpu               = optional(string, "1")
     memory            = optional(string, "2Gi")
@@ -1009,4 +838,58 @@ variable "chunk_db_size" {
     condition     = var.chunk_db_size == "" || can(regex("^[0-9]+(B|KiB|MiB|GiB|TiB)?$", var.chunk_db_size))
     error_message = "chunk_db_size must be empty, whole bytes, or an integer with B/KiB/MiB/GiB/TiB."
   }
+}
+
+variable "adx_public_service_enabled" {
+  type        = bool
+  description = "Expose ADX control and data listeners directly through a Kubernetes Service."
+  default     = true
+}
+
+variable "adx_service_type" {
+  type        = string
+  description = "Type of the ADX public Service."
+  default     = "LoadBalancer"
+  validation {
+    condition     = contains(["LoadBalancer", "NodePort", "ClusterIP"], var.adx_service_type)
+    error_message = "ADX service type must be LoadBalancer, NodePort or ClusterIP."
+  }
+}
+
+variable "adx_service_annotations" {
+  type        = map(string)
+  description = "Cloud load-balancer annotations for the ADX public Service."
+  default     = {}
+}
+
+variable "adx_load_balancer_ip" {
+  type        = string
+  description = "Optional address of an existing ADX load balancer."
+  default     = ""
+}
+
+variable "adx_control_port" {
+  type        = number
+  description = "ADX public HTTPS control and PTY port."
+  default     = 443
+  validation {
+    condition     = var.adx_control_port >= 1 && var.adx_control_port <= 65535 && floor(var.adx_control_port) == var.adx_control_port
+    error_message = "ADX control port must be an integer between 1 and 65535."
+  }
+}
+
+variable "adx_data_port" {
+  type        = number
+  description = "ADX public HTTP sandbox data port."
+  default     = 80
+  validation {
+    condition     = var.adx_data_port >= 1 && var.adx_data_port <= 65535 && floor(var.adx_data_port) == var.adx_data_port
+    error_message = "ADX data port must be an integer between 1 and 65535."
+  }
+}
+
+variable "adx_public_access" {
+  type        = bool
+  description = "Automatically provision a public Huawei Cloud ELB for ADX."
+  default     = true
 }

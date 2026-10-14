@@ -1,9 +1,6 @@
 kruise:
   enabled: ${enable_kruise}
 
-auth:
-  litebusDataKey: "${iam_litebus_data_key}"
-
 monitoring:
   akernelEnv: "${akernel_env}"
 %{ if install_monitor ~}
@@ -12,61 +9,50 @@ monitoring:
   tempoEndpoint: "http://tempo.${monitor_namespace}.svc:3200"
 %{ endif ~}
 
-etcd:
-  image:
-    repository: "${etcd_image_repository}"
-    tag: "${etcd_image_tag}"
-  persistence:
-    enabled: true
-    storageClassName: "csi-disk"
-    size: "${etcd_pvc_size}"
-    accessModes:
-      - "ReadWriteOnce"
-  resources:
-    limits:
-      cpu: "${etcd_cpu}"
-      memory: "${etcd_memory}"
-      ephemeral-storage: "${etcd_ephemeral}"
-    requests:
-      cpu: "${etcd_cpu}"
-      memory: "${etcd_memory}"
-      ephemeral-storage: "${etcd_ephemeral}"
-
-master:
-  replicas: ${master_replicas}
-  schedulePlacementPolicy: "${schedule_placement_policy}"
-  image:
-    repository: "${master_image_repository}"
-    tag: "${master_image_tag}"
-  service:
-    type: "${master_service_type}"
-    annotations: ${jsonencode(master_service_annotations)}
-    loadBalancerIP: "${master_service_loadbalancer_ip}"
-  resources:
-    limits:
-      cpu: "${master_cpu}"
-      memory: "${master_memory}"
-      ephemeral-storage: "${master_ephemeral}"
-    requests:
-      cpu: "${master_cpu}"
-      memory: "${master_memory}"
-      ephemeral-storage: "${master_ephemeral}"
-%{ if frontend_enabled ~}
-
-frontend:
-  enabled: true
-  replicas: ${frontend_replicas}
-  image:
-    repository: "${master_image_repository}"
-    tag: "${master_image_tag}"
-  resources:
-    limits:
-      cpu: "${frontend_cpu}"
-      memory: "${frontend_memory}"
-    requests:
-      cpu: "${frontend_cpu}"
-      memory: "${frontend_memory}"
-%{ endif ~}
+adx:
+  tls:
+    existingSecret: akernel-adx-tls
+  redis:
+    mode: managed
+    appendfsync: everysec
+    persistence:
+      enabled: true
+      storageClassName: "csi-disk"
+      size: "${etcd_pvc_size}"
+      accessModes:
+        - "ReadWriteOnce"
+    resources:
+      limits:
+        cpu: "${etcd_cpu}"
+        memory: "${etcd_memory}"
+      requests:
+        cpu: "${etcd_cpu}"
+        memory: "${etcd_memory}"
+  coordinator:
+    replicas: 1
+    resources:
+      limits:
+        cpu: "${master_cpu}"
+        memory: "${master_memory}"
+      requests:
+        cpu: "${master_cpu}"
+        memory: "${master_memory}"
+  ingressApi:
+    replicas: 1
+    publicService:
+      enabled: ${adx_public_service_enabled}
+      type: "${adx_service_type}"
+      controlPort: ${adx_control_port}
+      dataPort: ${adx_data_port}
+      annotations: ${jsonencode(adx_service_annotations)}
+      loadBalancerIP: "${adx_load_balancer_ip}"
+    resources:
+      limits:
+        cpu: "${master_cpu}"
+        memory: "${master_memory}"
+      requests:
+        cpu: "${master_cpu}"
+        memory: "${master_memory}"
 
 node:
   image:
@@ -202,44 +188,13 @@ node:
         registry_auths_path="/home/akernel/sandboxd/config/registry_auths.json"
         cgroup_memory_limit="64GiB"
 
-        # node-resource config. sock_path matches what yuanrong's C++
-        # external_system_collector reads, so it must stay /var/run/...
+        # Node resource reports consumed by the control-plane collector.
         [plugin.node_resource]
         provider="kubernetes"
         sock_path="/var/run/resource.sock"
 
-traefik:
-  enabled: ${install_traefik}
-  replicas: ${traefik_replicas}
-  enableWebEntrypoint: ${traefik_enable_web_entrypoint}
+coordinator:
   image:
-    repository: "${traefik_image_repository}"
-    tag: "${traefik_image_tag}"
-  ports:
-%{ if traefik_enable_web_entrypoint ~}
-    web: ${traefik_web_port}
-    websecure: ${traefik_websecure_port}
-%{ else ~}
-    tcp: ${traefik_tcp_port}
-%{ endif ~}
-  service:
-    type: "${traefik_service_type}"
-    annotations: ${jsonencode(traefik_service_annotations)}
-    loadBalancerIP: "${traefik_service_loadbalancer_ip}"
-  tls:
-    enabled: ${traefik_tls_enabled}
-    createSecret: ${traefik_tls_create_secret}
-%{ if traefik_tls_cert != "" ~}
-    moduleCrt: ${jsonencode(traefik_tls_cert)}
-%{ endif ~}
-%{ if traefik_tls_key != "" ~}
-    moduleKey: ${jsonencode(traefik_tls_key)}
-%{ endif ~}
-  internalStats:
-    enabled: ${traefik_internal_stats}
-    image: "${traefik_internal_stats_image}"
-  grafana:
-    enabled: ${traefik_grafana_enabled}
-%{ if traefik_grafana_url != "" ~}
-    url: "${traefik_grafana_url}"
-%{ endif ~}
+    repository: "${master_image_repository}"
+    tag: "${master_image_tag}"
+  schedulePlacementPolicy: "${schedule_placement_policy}"

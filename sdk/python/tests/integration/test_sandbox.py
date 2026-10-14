@@ -29,18 +29,27 @@ _ENABLED = (
     and bool(os.environ.get("AKERNEL_TOKEN"))
 )
 _RUNTIME = os.environ.get("AKERNEL_TEST_RUNTIME", "runsc")
-_IMAGE = os.environ.get("AKERNEL_TEST_IMAGE") or None
+_IMAGE = (
+    os.environ.get("AKERNEL_TEST_INTEGRATION_IMAGE")
+    or os.environ.get("AKERNEL_TEST_IMAGE")
+    or None
+)
+
 _NETWORK_URL = os.environ.get("AKERNEL_TEST_NETWORK_URL", "https://example.com/")
 
 _INSTALL_CURL_COMMAND = (
-    "command -v curl >/dev/null 2>&1 || (apt-get update && "
+    "command -v curl >/dev/null || ("
+    "apt-get update && "
     "DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
     "curl ca-certificates)"
 )
 
+_CHECKPOINT_SOCKET = shlex.quote(
+    os.environ.get("AKERNEL_TEST_CHECKPOINT_SOCKET", "/run/akernel/execd.sock")
+)
 _CHECKPOINT_COMMAND = (
     "curl --fail-with-body --silent --show-error "
-    "--unix-socket /run/akernel/rrt.sock "
+    f"--unix-socket {_CHECKPOINT_SOCKET} "
     "--request POST http://localhost/checkpoint"
 )
 
@@ -158,9 +167,11 @@ class SandboxIntegrationTest(unittest.TestCase):
         with self.sandbox.pty.create(on_data=output.extend) as session:
             session.send_stdin(b"printf 'AKERNEL_PTY_OK\\n'\n")
             session.resize(rows=40, cols=120)
+            session.send_stdin(b"stty size\n")
             session.send_stdin(b"exit 7\n")
             self.assertEqual(session.wait(timeout=30), 7)
         self.assertIn(b"AKERNEL_PTY_OK", output)
+        self.assertIn(b"40 120", output)
 
     def test_pty_sessions_are_independent(self):
         first_output = bytearray()
@@ -216,6 +227,10 @@ class SandboxReloadIntegrationTest(unittest.TestCase):
             f"stdout={last_result.stdout!r}, stderr={last_result.stderr!r}"
         )
 
+    @unittest.skipIf(
+        _RUNTIME == "kata",
+        "Kata does not support checkpoint/restore or writable-layer limits",
+    )
     def test_internal_checkpoint_reload_and_reverse_tunnel(self):
         server = socketserver.ThreadingTCPServer(
             ("127.0.0.1", 0),
