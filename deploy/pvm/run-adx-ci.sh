@@ -75,6 +75,10 @@ export AKERNEL_TEST_NETWORK_ALLOWED_HOST=allowed.pvm-ci.test
 export AKERNEL_TEST_NETWORK_WILDCARD_HOST=child.blocked.pvm-ci.test
 export AKERNEL_TEST_NETWORK_PORT=18090
 source "${AKERNEL_STANDALONE_DATA_DIR}/sdk.env"
+[[ -s "${AKERNEL_STANDALONE_DATA_DIR}/token" ]]
+export AKERNEL_TOKEN="$(<"${AKERNEL_STANDALONE_DATA_DIR}/token")"
+printf '::add-mask::%s\n' "${AKERNEL_TOKEN}"
+[[ -n "${AKERNEL_SERVER_ADDRESS}" && -n "${AKERNEL_TOKEN}" ]]
 export AKERNEL_RUN_INTEGRATION=1 AKERNEL_TEST_RUNTIME=firecracker-pvm
 export PYTHONPATH="${root}/sdk/python"
 export AKERNEL_TEST_IMAGE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["oci"])' "$fixtures")
