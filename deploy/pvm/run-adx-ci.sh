@@ -101,8 +101,6 @@ from pathlib import Path
 p=Path(sys.argv[1]);text=p.read_text();old='resolv_conf_path="/etc/resolv.conf"'
 assert text.count(old)==1
 text=text.replace(old,'resolv_conf_path="/home/akernel/sandboxd/config/pvm-ci-resolv.conf"')
-assert text.count('[plugin.runtime.firecracker]')==1
-text=text.replace('[plugin.runtime.firecracker]','[plugin.runtime.firecracker]\ncheckpoint_mode="incremental"')
 p.write_text(text)
 RESOLVER
 python3 deploy/pvm/dns-fixture.py > "${out}/dns-fixture.log" 2>&1 &
@@ -118,6 +116,12 @@ export AKERNEL_TOKEN="$(<"${AKERNEL_STANDALONE_DATA_DIR}/token")"
 printf '::add-mask::%s\n' "${AKERNEL_TOKEN}"
 [[ -n "${AKERNEL_SERVER_ADDRESS}" && -n "${AKERNEL_TOKEN}" ]]
 export AKERNEL_RUN_INTEGRATION=1 AKERNEL_TEST_RUNTIME=firecracker-pvm
+export AKERNEL_TEST_CHECKPOINT_MEMORY_MIB=512
+python3 - "$out" <<'SETTINGS'
+import json,sys
+from pathlib import Path
+(Path(sys.argv[1])/'qualification-settings.json').write_text(json.dumps({'runtime':'firecracker-pvm','checkpoint_memory_mib':512,'other_sdk_memory_mib':2048,'checkpoint_snapshot_type':'Full (requested explicitly by ADX)','debugctl_applied':False,'large_full_reload_qualified':False},indent=2))
+SETTINGS
 export PYTHONPATH="${root}/sdk/python"
 export AKERNEL_TEST_IMAGE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["oci"])' "$fixtures")
 export AKERNEL_TEST_HTTP_IMAGE="$AKERNEL_TEST_IMAGE"

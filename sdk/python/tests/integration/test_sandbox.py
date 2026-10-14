@@ -248,7 +248,9 @@ class SandboxReloadIntegrationTest(unittest.TestCase):
         try:
             sandbox = Sandbox(
                 cpu=1000,
-                memory=2048,
+                memory=int(
+                    os.environ.get("AKERNEL_TEST_CHECKPOINT_MEMORY_MIB", "2048")
+                ),
                 storage_mb=256,
                 runtime=_RUNTIME,
                 image=_IMAGE,
