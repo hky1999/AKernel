@@ -147,6 +147,8 @@ Keep official build-download sources as the default and mirror/proxy selection e
 
 PVM is an experimental opt-in node profile. Standalone selects `AKERNEL_FIRECRACKER_BACKEND=pvm`; Helm selects `node.config.sandboxd.firecrackerBackend=pvm`. This selects `firecracker-pvm`, removes Kata from that profile, and requires the validated PVM guest bundle and matched OOT host `kvm.ko`/`kvm-pvm.ko` modules. `deploy/pvm/oot-host.env` separately pins the source, generic OOT baseline and target patch profile. Prepare that profile into a fresh export, verify the exact host inputs and build against the existing distribution kernel; do not build or replace the host kernel. The host-only OOT source and PVM guest source are distinct. VMX/SVM is unnecessary on the host/L1, but the other CPU features, supported boot settings and module-loading policy still apply. Sandboxd verifies the actual backend before advertising it. Keep default KVM behavior unchanged; see `deploy/pvm-runtime.md` for module preparation, placement, restore and rollout boundaries.
 
+PVM development currently targets the `hky1999/AKernel` and `hky1999/sandboxd` forks. Keep the sandboxd submodule URL and gitlink consistent. The OOT host profile includes the upstream OSPKE guard fix; guest TSC changes and the optional DEBUGCTL optimization remain separate. Same-host/L1-boot restore is the current boundary, and existing hardware-KVM CI does not qualify PVM. See `deploy/pvm-runtime.md` before changing guest pins or CI.
+
 Install the complete checksum-pinned gVisor release archive with sandboxd's
 `third_party/install-gvisor.sh`. Preserve runsc, the containerd shim, and all
 four adjacent `gvisor-bin/` helpers in the final image. The manifest SHA-512
