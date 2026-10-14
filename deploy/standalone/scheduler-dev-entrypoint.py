@@ -21,6 +21,37 @@ CAPACITY_VALID_SECONDS = 60
 CAPACITY_REFRESH_SECONDS = 10
 
 
+def elastic_memory_enabled():
+    """只接受明确的布尔配置，避免拼写错误意外启用或关闭策略。"""
+    value = os.environ.get("AKERNEL_SCHEDULER_ELASTIC_MEMORY", "false")
+    if value not in ("true", "false"):
+        raise RuntimeError("AKERNEL_SCHEDULER_ELASTIC_MEMORY 只能是 true 或 false")
+    return value == "true"
+
+
+def configure_memory_control(expanded, sandboxd_text, enabled):
+    """为单节点实验同时配置中心策略和守护进程的软节流比例。"""
+    coordinators = [service for service in expanded["services"]
+                    if service["role"] == "coordinator"]
+    if len(coordinators) != 1 or not isinstance(enabled, bool):
+        raise RuntimeError("自动内存策略要求单个 Coordinator 和明确的布尔开关")
+    config = coordinators[0]["config"]
+    policy = {
+        "grow_per_mille": 650, "shrink_per_mille": 300, "target_per_mille": 500,
+        "cooldown_millis": 5000, "low_usage_millis": 30000, "low_usage_samples": 5,
+        "max_sample_age_millis": 10000, "operation_timeout_millis": 10000,
+    } if enabled else None
+    if config.get("memory_control") not in (None, policy):
+        raise RuntimeError("展开配置已有不同的自动内存策略")
+    if not enabled:
+        return sandboxd_text
+    marker = "[plugin.resource]\n"
+    if sandboxd_text.count(marker) != 1 or "memory_high_ratio" in sandboxd_text:
+        raise RuntimeError("守护进程模板的内存软节流配置与预期不一致")
+    config["memory_control"] = policy
+    return sandboxd_text.replace(marker, marker + "memory_high_ratio=0.75\n")
+
+
 def fixed_capacity():
     """返回本实验明确预留的容量，不使用主机瞬时空闲量。"""
     return {"cpu_millis": 3000, "memory_bytes": 12 * 1024**3,
@@ -139,7 +170,7 @@ def prepare_cgroup():
 
 def prepare_config(templates=Path("/etc/akernel/dev-templates"),
                    output=Path("/etc/akernel/adx-standalone.yaml"),
-                   adxctl="/opt/adx/current/bin/adxctl"):
+                   adxctl="/opt/adx/current/bin/adxctl", *, elastic_memory=False):
     config = STATE / "sandboxd/config"
     config.mkdir(parents=True, exist_ok=True)
     for name in ("config.json", "oss.json", "registry.json", "oss_auths.json"):
@@ -168,7 +199,6 @@ def prepare_config(templates=Path("/etc/akernel/dev-templates"),
         if old not in text:
             raise RuntimeError("开发模板与预期配置不一致")
         text = text.replace(old, new)
-    (STATE / "sandboxd/config.toml").write_text(text)
     images = STATE / "images"
     images.mkdir(exist_ok=True)
     shutil.copyfile(config / "config.json", images / "config.json")
@@ -207,6 +237,8 @@ def prepare_config(templates=Path("/etc/akernel/dev-templates"),
     expanded = yaml.safe_load(subprocess.check_output(
         [adxctl, "--config", str(output), "config", "dump"], text=True))
     configure_host_budget(expanded)
+    text = configure_memory_control(expanded, text, elastic_memory)
+    (STATE / "sandboxd/config.toml").write_text(text)
     for service in expanded["services"]:
         if service["role"] == "adxlet":
             service["config"]["resource_source"] = {
@@ -221,8 +253,9 @@ def prepare_config(templates=Path("/etc/akernel/dev-templates"),
 
 
 def main():
+    elastic_memory = elastic_memory_enabled()
     prepare_cgroup()
-    prepare_config()
+    prepare_config(elastic_memory=elastic_memory)
     capacity_lease = FixedCapacityLease()
     subprocess.run(["/usr/local/bin/sandboxd-network-prepare"], check=True)
     (STATE / "logs/sandboxd").mkdir(parents=True, exist_ok=True)

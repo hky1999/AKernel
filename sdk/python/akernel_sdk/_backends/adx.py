@@ -609,6 +609,14 @@ class AdxBackend:
             ),
             connection=self._connection,
         )
+        if spec.elastic_memory is not None:
+            if "elastic-memory" not in getattr(adx_sandbox, "SDK_CAPABILITIES", ()):
+                raise UnsupportedBackendFeatureError(
+                    "Elastic memory requires a matching adx-sandbox source build."
+                )
+            create_args["elastic_memory"] = adx_sandbox.ElasticMemoryPolicy(
+                high_per_mille=spec.elastic_memory.high_per_mille
+            )
         try:
             sandbox = _OwnedSandbox(**create_args)
         except Exception as error:

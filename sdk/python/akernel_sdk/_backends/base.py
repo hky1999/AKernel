@@ -25,6 +25,7 @@ from .._addresses import Endpoint
 from ..types import (
     CommandInfo,
     CommandResult,
+    ElasticMemoryPolicy,
     EntryInfo,
     HttpReverseTunnel,
     Mount,
@@ -80,6 +81,7 @@ class SandboxSpec:
     storage_limit_mb: int
     network_policy: NetworkPolicy | None
     extra_config: Mapping[str, object]
+    elastic_memory: ElasticMemoryPolicy | None = None
 
 
 class CommandsDriver(Protocol):

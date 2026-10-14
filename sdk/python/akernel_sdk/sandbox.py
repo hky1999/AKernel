@@ -34,6 +34,7 @@ from .commands import CommandHandle, Commands
 from .filesystem import Filesystem
 from .pty import Pty
 from .types import (
+    ElasticMemoryPolicy,
     HttpReverseTunnel,
     Mount,
     NetworkPolicy,
@@ -168,6 +169,7 @@ class Sandbox:
         detached: bool = False,
         node_id: str | None = None,
         *,
+        elastic_memory: ElasticMemoryPolicy | None = None,
         failover: bool = False,
         inherit_entrypoint: bool = False,
         xpu: str | None = None,
@@ -188,6 +190,9 @@ class Sandbox:
             memory: Requested memory in MiB.
             cpu_limit: CPU limit in millicores, or zero to follow ``cpu``.
             mem_limit: Memory limit in MiB, or zero to follow ``memory``.
+            elastic_memory: 显式启用 runsc 内存弹性。memory 是出生额度及下界，
+                mem_limit 是允许上界；CPU 保持固定。服务端和后端 SDK
+                必须支持弹性内存，部署还需启用自动策略。
             idle_timeout: Seconds before an idle sandbox is reclaimed.
             schedule_timeout: Positive scheduling timeout in seconds.
             env: Environment variables applied to the sandbox process.
@@ -275,6 +280,20 @@ class Sandbox:
             raise ValueError("cpu_limit must be 0 or greater than or equal to cpu")
         if mem_limit and mem_limit < memory:
             raise ValueError("mem_limit must be 0 or greater than or equal to memory")
+        if elastic_memory is not None:
+            if not isinstance(elastic_memory, ElasticMemoryPolicy):
+                raise TypeError("elastic_memory must be an ElasticMemoryPolicy")
+            if runtime != "runsc":
+                raise ValueError("elastic memory requires runsc")
+            if (cpu_limit or cpu) < 10:
+                raise ValueError("elastic memory requires at least 10 CPU millicores")
+            if (mem_limit or memory) > (1 << 33):
+                raise ValueError("elastic memory ceiling exceeds 2^53 bytes")
+            high = (memory * (1 << 20) * elastic_memory.high_per_mille + 999) // 1000
+            if high < 4096:
+                raise ValueError(
+                    "elastic memory.high must span at least one 4096-byte page"
+                )
         if env is not None:
             if not isinstance(env, Mapping) or not all(
                 isinstance(key, str) and isinstance(value, str)
@@ -351,6 +370,7 @@ class Sandbox:
             memory=memory,
             cpu_limit=cpu_limit,
             mem_limit=mem_limit,
+            elastic_memory=elastic_memory,
             idle_timeout=idle_timeout,
             schedule_timeout=schedule_timeout,
             env=MappingProxyType(dict(env or {})),

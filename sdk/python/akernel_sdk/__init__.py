@@ -28,6 +28,7 @@ from .types import (
     CommandResult,
     DNSPolicy,
     DNSRule,
+    ElasticMemoryPolicy,
     EntryInfo,
     HttpReverseTunnel,
     Mount,
@@ -42,6 +43,7 @@ from .types import (
 
 __all__ = [
     "Sandbox",
+    "ElasticMemoryPolicy",
     "S3Config",
     "Mount",
     "NetworkPolicy",

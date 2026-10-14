@@ -13,7 +13,8 @@ OWNER = "akernel.scheduler.environment=agent-dx-dev-20261010"
 STATE = Path("/data/akernel-agent-dx-dev/state")
 
 
-def commands(image):
+def commands(image, *, elastic_memory=False):
+    environment = ["--env", "AKERNEL_SCHEDULER_ELASTIC_MEMORY=true"] if elastic_memory else []
     return [
         ["docker", "network", "create", "--label", OWNER, NETWORK],
         ["docker", "run", "--detach", "--name", NAME, "--label", OWNER,
@@ -22,7 +23,7 @@ def commands(image):
          "--memory-swap", "16g", "--pids-limit", "8192",
          "--publish", "127.0.0.1:19443:8443", "--publish", "127.0.0.1:19080:8080",
          "--mount", f"type=bind,source={STATE},target=/home/akernel",
-         "--log-opt", "max-size=16m", "--log-opt", "max-file=3", image],
+         "--log-opt", "max-size=16m", "--log-opt", "max-file=3", *environment, image],
     ]
 
 
@@ -30,6 +31,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--elastic-memory", action="store_true",
+                        help="启用匹配候选的自动内存策略和 75%% 的软节流比例")
     args = parser.parse_args()
     # 镜像必须使用完整本地内容身份，不通过可变标签启动。
     if not args.image.startswith("sha256:") or len(args.image) != 71:
@@ -38,7 +41,7 @@ def main():
         int(args.image[7:], 16)
     except ValueError:
         parser.error("镜像 SHA256 非法")
-    plan = commands(args.image)
+    plan = commands(args.image, elastic_memory=args.elastic_memory)
     print(json.dumps({"state": str(STATE), "commands": plan}, indent=2), flush=True)
     if not args.apply:
         return

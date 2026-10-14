@@ -72,6 +72,7 @@ assert get_type_hints(apply_dockerfile)['sb'] is Sandbox
             set(akernel_sdk.__all__),
             {
                 "Sandbox",
+                "ElasticMemoryPolicy",
                 "S3Config",
                 "Mount",
                 "NetworkPolicy",

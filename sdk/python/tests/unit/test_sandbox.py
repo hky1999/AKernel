@@ -61,6 +61,28 @@ class SandboxTest(unittest.TestCase):
         self.load_backend.start()
         self.addCleanup(self.load_backend.stop)
 
+    def test_elastic_memory_reaches_backend_and_validates_before_creation(self):
+        import akernel_sdk as sdk
+
+        policy = sdk.ElasticMemoryPolicy(high_per_mille=750)
+        with Sandbox(cpu=500, memory=128, mem_limit=256, elastic_memory=policy):
+            spec = self.backend.create.call_args.args[0]
+            self.assertEqual(spec.elastic_memory, policy)
+            self.assertEqual((spec.memory, spec.mem_limit), (128, 256))
+        self.backend.create.reset_mock()
+        for options in (
+            {"runtime": "kata"}, {"cpu": 9}, {"mem_limit": 8589934593},
+            {"elastic_memory": {"high_per_mille": 750}},
+            {"memory": 1, "elastic_memory": sdk.ElasticMemoryPolicy(1)},
+        ):
+            with self.subTest(options=options):
+                with self.assertRaises((TypeError, ValueError)):
+                    Sandbox(**{"elastic_memory": policy, **options})
+        self.backend.create.assert_not_called()
+        for ratio in (True, 0, 1000, 750.5, "750"):
+            with self.subTest(ratio=ratio), self.assertRaises((TypeError, ValueError)):
+                sdk.ElasticMemoryPolicy(ratio)
+
     def test_default_constructor_and_info(self):
         sandbox = Sandbox(cpu=2000, memory=8192)
         self.assertEqual(sandbox.id, "physical-id")

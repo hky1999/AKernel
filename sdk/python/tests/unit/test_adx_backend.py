@@ -65,6 +65,25 @@ class AdxBackendTest(unittest.TestCase):
             token="secret",
         )
 
+    def test_elastic_memory_is_converted_and_requires_matching_sdk(self):
+        import akernel_sdk as sdk
+
+        backend = adx.AdxBackend(self.config)
+        spec = _spec(cpu=500, memory=128, mem_limit=256,
+                     elastic_memory=sdk.ElasticMemoryPolicy(750))
+        with patch.object(adx, "_OwnedSandbox") as native:
+            backend.create(spec)
+        policy = native.call_args.kwargs["elastic_memory"]
+        self.assertIsInstance(policy, adx.adx_sandbox.ElasticMemoryPolicy)
+        self.assertEqual(policy.high_per_mille, 750)
+        with patch.object(adx.adx_sandbox, "SDK_CAPABILITIES", frozenset()), \
+                patch.object(adx, "_OwnedSandbox") as native:
+            with self.assertRaises(adx.UnsupportedBackendFeatureError):
+                backend.create(spec)
+            native.assert_not_called()
+            backend.create(_spec())
+            self.assertNotIn("elastic_memory", native.call_args.kwargs)
+
     def test_detached_pty_uses_the_backend_connection(self):
         backend = adx.AdxBackend(self.config)
         with patch.object(adx.adx_sandbox, "Pty") as pty_type:

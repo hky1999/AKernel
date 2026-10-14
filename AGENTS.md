@@ -684,3 +684,13 @@ dashboards from the pinned ADX revision and preserve their UIDs and queries.
 Update `deploy/observability.md` whenever collection, labels, or log paths
 change. Validate backend receipt with real SDK requests, not Helm rendering
 alone.
+
+## Scheduler memory development
+
+调度器开发分支的 Python SDK 公开 `ElasticMemoryPolicy` 与 `Sandbox(elastic_memory=...)`。
+请求内存是出生额度及下界，mem_limit 是允许上界；省略选项保持固定额度。
+仅支持 runsc，不能把 CPU 配额配置写成 CPU 自动弹性。原发布依赖锁保持，开发候选必须
+使用匹配的 adx-sandbox 源码构建；后端能力缺失应明确报错，不能悄悄忽略选项。
+开发启动器的 `--elastic-memory` 默认关闭；启用后同步配置中心策略与 sandboxd 的
+全局 0.75 软节流比例。参见 `deploy/standalone/scheduler-dev.md`，源码和配置测试
+不代替实际物理资源曲线及预算验收。

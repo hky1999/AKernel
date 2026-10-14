@@ -101,6 +101,7 @@ Sandbox(
     detached: bool = False,
     node_id: str | None = None,
     *,
+    elastic_memory: ElasticMemoryPolicy | None = None,
     xpu: str | None = None,
     storage_mb: int | None = None,
     storage_limit_mb: int = 0,
@@ -659,6 +660,26 @@ security boundaries, and supported syntax in
 [runnable example](./examples/dockerfile_launch.py).
 
 ## Resources and lifecycle
+
+本开发分支支持显式的内存弹性选项：
+
+```python
+from akernel_sdk import ElasticMemoryPolicy, Sandbox
+
+with Sandbox(cpu=500, memory=128, mem_limit=256,
+             elastic_memory=ElasticMemoryPolicy(high_per_mille=750)) as sandbox:
+    print(sandbox.commands.run("echo ready").stdout)
+```
+
+`memory` 是出生额度及下界，`mem_limit` 是允许上界，单位均为 MiB；CPU 保持固定。
+省略此选项或传入 `None` 保持固定额度行为。仅支持 runsc，比例范围为 1 到 999，必须匹配
+sandboxd 的软节流配置；实际 CPU 至少为 10 millicores，内存上界不超过 2^53 字节，
+出生 memory.high 至少为 4096 字节。非法输入在创建前拒绝。
+自动调整还需要匹配的服务端和显式中心策略，源码接线不表示已通过物理验收。
+当前公开依赖锁仍指向旧发布版本；测试本功能必须安装本项目登记的 adx-sandbox 源码候选。
+SDK 会检查后端的 `elastic-memory` 能力，缺少时明确报错；固定额度请求不依赖这项能力。
+私有开发候选未发布为 PyPI 版本，不能将普通 `pip install akernel-sdk` 当作该功能的发布验收。
+
 
 `resources()` returns stable `NodeInfo` values rather than backend objects:
 
