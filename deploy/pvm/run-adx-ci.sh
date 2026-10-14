@@ -53,11 +53,11 @@ export AKERNEL_CONTAINER_NO_PROXY=localhost,127.0.0.1,172.17.0.1,10.88.0.1
 # Keep Redis AOF/control writes on the L1 root disk while snapshot writes use XFS.
 export AKERNEL_STANDALONE_DATA_DIR="/root/pvm-ci/adx-${GITHUB_RUN_ID:-local}"
 storage="/audit-xfs/pvm-ci/adx-${GITHUB_RUN_ID:-local}"
-mkdir -p "${storage}/sandboxd" "${storage}/checkpoints" \
-  "${AKERNEL_STANDALONE_DATA_DIR}/sandboxd" "${AKERNEL_STANDALONE_DATA_DIR}/adx/checkpoints"
+mkdir -p "${storage}/filestore" "${storage}/checkpoints" \
+  "${AKERNEL_STANDALONE_DATA_DIR}/filestore" "${AKERNEL_STANDALONE_DATA_DIR}/adx/checkpoints"
 [[ $(findmnt -no FSTYPE -T "${AKERNEL_STANDALONE_DATA_DIR}") == ext4 ]]
-for name in sandboxd checkpoints; do
-  target="${AKERNEL_STANDALONE_DATA_DIR}/sandboxd"
+for name in filestore checkpoints; do
+  target="${AKERNEL_STANDALONE_DATA_DIR}/filestore"
   if [[ "${name}" == checkpoints ]]; then target="${AKERNEL_STANDALONE_DATA_DIR}/adx/checkpoints"; fi
   ! mountpoint -q "${target}" || { echo 'Private storage target already mounted' >&2; exit 1; }
 done
@@ -65,14 +65,14 @@ python3 - "$out" "$AKERNEL_STANDALONE_DATA_DIR" "$storage" <<'STORAGE'
 import json,sys
 from pathlib import Path
 out,root,storage=map(Path,sys.argv[1:])
-(out/'storage-layout.json').write_text(json.dumps({'control_fstype':'ext4','runtime_fstype':'xfs','mounts':[{'source':str(storage/'sandboxd'),'target':str(root/'sandboxd')},{'source':str(storage/'checkpoints'),'target':str(root/'adx/checkpoints')}]},indent=2))
+(out/'storage-layout.json').write_text(json.dumps({'control_fstype':'ext4','runtime_fstype':'xfs','mounts':[{'source':str(storage/'filestore'),'target':str(root/'filestore')},{'source':str(storage/'checkpoints'),'target':str(root/'adx/checkpoints')}]},indent=2))
 STORAGE
-for name in sandboxd checkpoints; do
-  target="${AKERNEL_STANDALONE_DATA_DIR}/sandboxd"
+for name in filestore checkpoints; do
+  target="${AKERNEL_STANDALONE_DATA_DIR}/filestore"
   if [[ "${name}" == checkpoints ]]; then target="${AKERNEL_STANDALONE_DATA_DIR}/adx/checkpoints"; fi
   mount --bind "${storage}/${name}" "${target}"
 done
-[[ $(findmnt -no FSTYPE -T "${AKERNEL_STANDALONE_DATA_DIR}/sandboxd") == xfs ]]
+[[ $(findmnt -no FSTYPE -T "${AKERNEL_STANDALONE_DATA_DIR}/filestore") == xfs ]]
 export AKERNEL_CONTROL_BIND=127.0.0.1 AKERNEL_DATA_BIND=127.0.0.1
 python3 - "${root}/deploy/standalone/config/registry.json" <<'REGISTRY'
 import json,sys
@@ -101,6 +101,8 @@ from pathlib import Path
 p=Path(sys.argv[1]);text=p.read_text();old='resolv_conf_path="/etc/resolv.conf"'
 assert text.count(old)==1
 text=text.replace(old,'resolv_conf_path="/home/akernel/sandboxd/config/pvm-ci-resolv.conf"')
+text=text.replace('filestore_dir_size="50G"','filestore_dir_size=""')
+text=text.replace('filestore_xfs_enabled=false','filestore_xfs_enabled=true')
 p.write_text(text)
 RESOLVER
 python3 deploy/pvm/dns-fixture.py > "${out}/dns-fixture.log" 2>&1 &
@@ -116,11 +118,11 @@ export AKERNEL_TOKEN="$(<"${AKERNEL_STANDALONE_DATA_DIR}/token")"
 printf '::add-mask::%s\n' "${AKERNEL_TOKEN}"
 [[ -n "${AKERNEL_SERVER_ADDRESS}" && -n "${AKERNEL_TOKEN}" ]]
 export AKERNEL_RUN_INTEGRATION=1 AKERNEL_TEST_RUNTIME=firecracker-pvm
-export AKERNEL_TEST_CHECKPOINT_MEMORY_MIB=512
+export AKERNEL_TEST_CHECKPOINT_MEMORY_MIB=2048
 python3 - "$out" <<'SETTINGS'
 import json,sys
 from pathlib import Path
-(Path(sys.argv[1])/'qualification-settings.json').write_text(json.dumps({'runtime':'firecracker-pvm','checkpoint_memory_mib':512,'other_sdk_memory_mib':2048,'checkpoint_snapshot_type':'Full (requested explicitly by ADX)','debugctl_applied':False,'large_full_reload_qualified':False},indent=2))
+(Path(sys.argv[1])/'qualification-settings.json').write_text(json.dumps({'runtime':'firecracker-pvm','checkpoint_memory_mib':2048,'other_sdk_memory_mib':2048,'checkpoint_snapshot_type':'Full (requested explicitly by ADX)','debugctl_applied':False,'large_full_reload_qualified':False},indent=2))
 SETTINGS
 export PYTHONPATH="${root}/sdk/python"
 export AKERNEL_TEST_IMAGE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["oci"])' "$fixtures")

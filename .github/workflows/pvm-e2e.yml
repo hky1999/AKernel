@@ -85,7 +85,7 @@ jobs:
               for mount in reversed(json.loads(file.read_text())['mounts']):
                   source,target=map(Path,(mount['source'],mount['target']))
                   root=Path('/root/pvm-ci')/('adx-'+os.environ['GITHUB_RUN_ID'])
-                  assert target in (root/'sandboxd',root/'adx/checkpoints')
+                  assert target in (root/'filestore',root/'adx/checkpoints')
                   assert source.is_relative_to('/audit-xfs/pvm-ci')
                   if subprocess.run(['mountpoint','-q',str(target)]).returncode:continue
                   assert source.stat().st_dev==target.stat().st_dev and source.stat().st_ino==target.stat().st_ino
