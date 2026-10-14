@@ -100,7 +100,10 @@ import sys
 from pathlib import Path
 p=Path(sys.argv[1]);text=p.read_text();old='resolv_conf_path="/etc/resolv.conf"'
 assert text.count(old)==1
-p.write_text(text.replace(old,'resolv_conf_path="/home/akernel/sandboxd/config/pvm-ci-resolv.conf"'))
+text=text.replace(old,'resolv_conf_path="/home/akernel/sandboxd/config/pvm-ci-resolv.conf"')
+assert text.count('[plugin.runtime.firecracker]')==1
+text=text.replace('[plugin.runtime.firecracker]','[plugin.runtime.firecracker]\ncheckpoint_mode="incremental"')
+p.write_text(text)
 RESOLVER
 python3 deploy/pvm/dns-fixture.py > "${out}/dns-fixture.log" 2>&1 &
 printf '%s\n' "$!" > "${out}/dns-fixture.pid"
