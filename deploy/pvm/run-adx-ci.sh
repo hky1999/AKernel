@@ -6,8 +6,12 @@ out="${PVM_CI_OUTPUT:-${root}/.local/pvm-ci}"
 mkdir -p "${out}"
 python3 "${root}/src/sandboxd/test/e2e/pvm-l1.py" > "${out}/l1-before.json"
 [[ "${EUID}" == 0 && "${DOCKER_HOST:-}" == unix:///run/pvm-ci-docker.sock ]]
-! pgrep -x firecracker
-! pgrep -x sandboxd
+for process in firecracker sandboxd virtiofsd; do
+  if pgrep -x "${process}"; then
+    echo "PVM CI refuses an existing ${process} process" >&2
+    exit 1
+  fi
+done
 if [[ ! -d /sys/module/kvm_pvm ]]; then
   [[ ! -d /sys/module/kvm ]]
   modprobe irqbypass
@@ -81,7 +85,7 @@ python -m tests.e2e.run --level standalone --output "${out}/adx-standalone" --bu
 python3 - "$out/adx-standalone/summary.json" <<'COVERAGE'
 import json,sys
 summary=json.load(open(sys.argv[1]))
-assert summary['results'] and all(r['status']=='passed' and not r.get('skipped') for r in summary['results']), [(r['name'],r['status']) for r in summary['results']]
+assert summary['results'] and all(r['status']=='passed' and not r.get('skipped_tests') for r in summary['results']), [(r['name'],r['status']) for r in summary['results']]
 COVERAGE
 nydus=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["nydus"])' "$fixtures")
 AKERNEL_TEST_IMAGE="$nydus" AKERNEL_TEST_INTEGRATION_IMAGE="$nydus" \
@@ -89,7 +93,7 @@ AKERNEL_TEST_IMAGE="$nydus" AKERNEL_TEST_INTEGRATION_IMAGE="$nydus" \
     --output "${out}/adx-nydus" --budget-seconds 1800
 python3 - "$out/adx-nydus/summary.json" <<'NYDUS_COVERAGE'
 import json,sys
-summary=json.load(open(sys.argv[1]));assert summary['results'] and all(r['status']=='passed' and not r.get('skipped') for r in summary['results'])
+summary=json.load(open(sys.argv[1]));assert summary['results'] and all(r['status']=='passed' and not r.get('skipped_tests') for r in summary['results'])
 NYDUS_COVERAGE
 for kind in oci nydus; do
   image=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$fixtures" "$kind")
