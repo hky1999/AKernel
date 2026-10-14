@@ -9,7 +9,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 subprocess.run(["python3", str(ROOT / "src/sandboxd/test/e2e/pvm-l1.py")], check=True)
-NAMES = {"blocked.pvm-ci.test", "child.blocked.pvm-ci.test", "allowed.pvm-ci.test"}
+NAMES = {
+    "blocked.pvm-ci.test": "192.0.2.44",
+    "child.blocked.pvm-ci.test": "192.0.2.44",
+    "allowed.pvm-ci.test": "172.17.0.1",
+}
 
 
 class Handler(socketserver.BaseRequestHandler):
@@ -38,7 +42,7 @@ class Handler(socketserver.BaseRequestHandler):
             (
                 b"\xc0\x0c"
                 + struct.pack("!HHIH", 1, 1, 5, 4)
-                + socket.inet_aton("172.17.0.1")
+                + socket.inet_aton(NAMES[name])
             )
             if known and kind == 1 and cls == 1
             else b""

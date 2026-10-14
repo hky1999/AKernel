@@ -50,7 +50,29 @@ docker image inspect --format '{{.Id}}' "$IMAGE" > "${out}/image-id.txt"
 export AKERNEL_FIRECRACKER_BACKEND=pvm AKERNEL_CHUNK_DB_SIZE=1GiB
 export AKERNEL_CONTAINER_PROXY=http://10.0.2.2:3128
 export AKERNEL_CONTAINER_NO_PROXY=localhost,127.0.0.1,172.17.0.1,10.88.0.1
-export AKERNEL_STANDALONE_DATA_DIR="/audit-xfs/pvm-ci/adx-${GITHUB_RUN_ID:-local}"
+# Keep Redis AOF/control writes on the L1 root disk while snapshot writes use XFS.
+export AKERNEL_STANDALONE_DATA_DIR="/root/pvm-ci/adx-${GITHUB_RUN_ID:-local}"
+storage="/audit-xfs/pvm-ci/adx-${GITHUB_RUN_ID:-local}"
+mkdir -p "${storage}/sandboxd" "${storage}/checkpoints" \
+  "${AKERNEL_STANDALONE_DATA_DIR}/sandboxd" "${AKERNEL_STANDALONE_DATA_DIR}/adx/checkpoints"
+[[ $(findmnt -no FSTYPE -T "${AKERNEL_STANDALONE_DATA_DIR}") == ext4 ]]
+for name in sandboxd checkpoints; do
+  target="${AKERNEL_STANDALONE_DATA_DIR}/sandboxd"
+  if [[ "${name}" == checkpoints ]]; then target="${AKERNEL_STANDALONE_DATA_DIR}/adx/checkpoints"; fi
+  ! mountpoint -q "${target}" || { echo 'Private storage target already mounted' >&2; exit 1; }
+done
+python3 - "$out" "$AKERNEL_STANDALONE_DATA_DIR" "$storage" <<'STORAGE'
+import json,sys
+from pathlib import Path
+out,root,storage=map(Path,sys.argv[1:])
+(out/'storage-layout.json').write_text(json.dumps({'control_fstype':'ext4','runtime_fstype':'xfs','mounts':[{'source':str(storage/'sandboxd'),'target':str(root/'sandboxd')},{'source':str(storage/'checkpoints'),'target':str(root/'adx/checkpoints')}]},indent=2))
+STORAGE
+for name in sandboxd checkpoints; do
+  target="${AKERNEL_STANDALONE_DATA_DIR}/sandboxd"
+  if [[ "${name}" == checkpoints ]]; then target="${AKERNEL_STANDALONE_DATA_DIR}/adx/checkpoints"; fi
+  mount --bind "${storage}/${name}" "${target}"
+done
+[[ $(findmnt -no FSTYPE -T "${AKERNEL_STANDALONE_DATA_DIR}/sandboxd") == xfs ]]
 export AKERNEL_CONTROL_BIND=127.0.0.1 AKERNEL_DATA_BIND=127.0.0.1
 python3 - "${root}/deploy/standalone/config/registry.json" <<'REGISTRY'
 import json,sys
@@ -64,7 +86,12 @@ registry=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["regis
 docker start "${registry}" >/dev/null
 mkdir -p "${out}/www"
 printf 'PVM_PRIVATE_NETWORK_OK\n' > "${out}/www/health.txt"
-python3 -m http.server 18090 --bind 172.17.0.1 --directory "${out}/www" > "${out}/private-http.log" 2>&1 &
+if ip -4 addr show dev lo | grep -q '192.0.2.44/32'; then
+  echo 'Private DNS fixture address already exists' >&2; exit 1
+fi
+ip addr add 192.0.2.44/32 dev lo
+printf '192.0.2.44/32 lo\n' > "${out}/private-http-ip.txt"
+python3 -m http.server 18090 --bind 0.0.0.0 --directory "${out}/www" > "${out}/private-http.log" 2>&1 &
 printf '%s\n' "$!" > "${out}/private-http.pid"
 mkdir -p "${AKERNEL_STANDALONE_DATA_DIR}/sandboxd/config"
 printf 'nameserver 172.17.0.1\n' > "${AKERNEL_STANDALONE_DATA_DIR}/sandboxd/config/pvm-ci-resolv.conf"
