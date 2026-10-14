@@ -445,7 +445,14 @@ COPY ./builder/scripts/akernel-entrypoint.sh /usr/local/bin/akernel-entrypoint
 COPY ./builder/scripts/adx-service.sh /usr/local/bin/adx-service
 COPY ./builder/scripts/otel-collector-service.sh /usr/local/bin/otel-collector-service
 COPY ./builder/scripts/sandboxd_network_prepare.sh /usr/local/bin/sandboxd-network-prepare
+ARG FIRECRACKER_KERNEL_PROFILE
 COPY ./builder/config/adx-standalone.yaml /etc/akernel/adx-standalone.yaml
+COPY ./builder/config/adx-pvm.yaml /etc/akernel/adx-pvm.yaml
+RUN case "${FIRECRACKER_KERNEL_PROFILE}" in \
+      pvm) cp /etc/akernel/adx-pvm.yaml /etc/akernel/adx-standalone.yaml ;; \
+      kvm) ;; \
+      *) echo "invalid Firecracker kernel profile" >&2; exit 1 ;; \
+    esac
 RUN chmod 0755 \
         /usr/local/bin/runsc \
         /usr/local/bin/sandboxd \
