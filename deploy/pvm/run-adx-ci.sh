@@ -66,10 +66,18 @@ mkdir -p "${out}/www"
 printf 'PVM_PRIVATE_NETWORK_OK\n' > "${out}/www/health.txt"
 python3 -m http.server 18090 --bind 172.17.0.1 --directory "${out}/www" > "${out}/private-http.log" 2>&1 &
 printf '%s\n' "$!" > "${out}/private-http.pid"
-bash deploy/standalone/start.sh > "${out}/standalone-start.log" 2>&1
+mkdir -p "${AKERNEL_STANDALONE_DATA_DIR}/sandboxd/config"
+printf 'nameserver 172.17.0.1\n' > "${AKERNEL_STANDALONE_DATA_DIR}/sandboxd/config/pvm-ci-resolv.conf"
+python3 - "${root}/deploy/standalone/config/sandboxd_config.toml" <<'RESOLVER'
+import sys
+from pathlib import Path
+p=Path(sys.argv[1]);text=p.read_text();old='resolv_conf_path="/etc/resolv.conf"'
+assert text.count(old)==1
+p.write_text(text.replace(old,'resolv_conf_path="/home/akernel/sandboxd/config/pvm-ci-resolv.conf"'))
+RESOLVER
 python3 deploy/pvm/dns-fixture.py > "${out}/dns-fixture.log" 2>&1 &
 printf '%s\n' "$!" > "${out}/dns-fixture.pid"
-docker exec akernel-node bash -ec 'printf "nameserver 172.17.0.1\n" > /etc/resolv.conf; systemctl restart sandboxd'
+bash deploy/standalone/start.sh > "${out}/standalone-start.log" 2>&1
 export AKERNEL_TEST_NETWORK_BLOCKED_HOST=blocked.pvm-ci.test
 export AKERNEL_TEST_NETWORK_ALLOWED_HOST=allowed.pvm-ci.test
 export AKERNEL_TEST_NETWORK_WILDCARD_HOST=child.blocked.pvm-ci.test
