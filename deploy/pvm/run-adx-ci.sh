@@ -98,6 +98,28 @@ NYDUS_COVERAGE
 for kind in oci nydus; do
   image=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$fixtures" "$kind")
   python benchmarks/sandbox_pressure.py --runtime firecracker-pvm --image "$image" \
-    --processes 1 --threads 2 --duration 30 --cpu 500 --cpu-limit 0 \
+    --processes 2 --threads 2 --duration 60 --cpu 500 --cpu-limit 0 \
     --memory 512 --mem-limit 0 --output "${out}/pressure-${kind}.json"
 done
+
+python3 - "$out" <<'PRESSURE_COVERAGE'
+import json,sys
+from pathlib import Path
+for kind in ('oci','nydus'):
+ report=json.loads((Path(sys.argv[1])/('pressure-'+kind+'.json')).read_text())
+ assert report['status']=='passed' and report['succeeded']>0 and report['failed']==0, report
+ assert report['succeeded']==report['attempted']
+PRESSURE_COVERAGE
+# Both control-plane and runtime inventories must drain before module teardown.
+for attempt in {1..30}; do
+  python -m akernel_sdk.cli list --quiet > "${out}/control-inventory.txt"
+  docker exec akernel-node sbox list > "${out}/runtime-inventory.txt"
+  if [[ ! -s "${out}/control-inventory.txt" ]] && \
+    [[ $(wc -l < "${out}/runtime-inventory.txt") == 1 ]] && ! pgrep -x firecracker; then
+    break
+  fi
+  if [[ "${attempt}" == 30 ]]; then echo 'Agent DX inventory did not drain' >&2; exit 1; fi
+  sleep 1
+done
+dmesg > "${out}/l1-dmesg.log"
+if grep -E 'BUG:|Oops|WARNING:|general protection' "${out}/l1-dmesg.log"; then exit 1; fi
