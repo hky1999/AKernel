@@ -24,7 +24,10 @@ for module in erofs fuse loop tun br_netfilter ip_tables ip6_tables \
   modprobe "${module}"
 done
 cd "${root}"
-export PVM_CANDIDATE_ARCHIVE="${PVM_CANDIDATE_ARCHIVE:-/opt/akernel-pvm-ci/firecracker.tgz}"
+distribution=$(python3 -c 'import json;print(json.load(open("src/sandboxd/third_party/firecracker-pvm.json")).get("distribution","actions"))')
+if [[ "${distribution}" == actions ]]; then
+  export PVM_CANDIDATE_ARCHIVE="${PVM_CANDIDATE_ARCHIVE:-/opt/akernel-pvm-ci/firecracker.tgz}"
+fi
 export FIRECRACKER_KERNEL_PROFILE=pvm AKERNEL_TARGETARCH=amd64
 export AKERNEL_ENABLE_KATA=false AKERNEL_ENABLE_FIRECRACKER=true AKERNEL_ENABLE_RUNC=false
 export AKERNEL_BUILD_PROXY=true DOCKER_BUILDKIT=1
@@ -37,7 +40,7 @@ for file in manifest.json kernel.config vmlinux initrd.img; do
 done
 docker cp "${container}:/usr/local/bin/firecracker" "${out}/payload/firecracker"
 docker rm "${container}" >/dev/null
-python3 - "$out/payload" "$root/src/sandboxd/third_party/firecracker-pvm-candidate.json" <<'PAYLOAD'
+python3 - "$out/payload" "$root/src/sandboxd/third_party/firecracker-pvm.json" <<'PAYLOAD'
 import hashlib,json,sys
 from pathlib import Path
 r=Path(sys.argv[1]);pin=json.loads(Path(sys.argv[2]).read_text());manifest=json.loads((r/'manifest.json').read_text())
