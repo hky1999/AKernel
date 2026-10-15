@@ -22,7 +22,12 @@ jobs:
           persist-credentials: false
           submodules: false
       - name: Initialize pinned sandboxd fork
-        run: git submodule update --init src/sandboxd
+        run: |
+          set -euo pipefail
+          git submodule update --init src/sandboxd
+          # Checkout does not clean ignored files inside a separately
+          # initialized submodule. Never reuse another pin's staged bundle.
+          git -C src/sandboxd clean -ffdx
       - name: Verify disposable L1 boundary
         run: |
           echo "PVM_CI_OUTPUT=${RUNNER_TEMP}/pvm-ci" >>"${GITHUB_ENV}"
