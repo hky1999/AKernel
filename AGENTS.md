@@ -97,6 +97,12 @@ limits, service reserve and disk headroom verify. The observation expires
 after 60 seconds without renewal; a rejected renewal does not stop existing
 executions or clear state. Keep the exclusive capacity-provider lock and
 atomic file publication.
+开发入口在原有 sandboxd 子进程退出后使用一秒至三十秒的指数退避独立重启，连续
+存活六十秒后重置退避；保持原调度服务和容量来源核验，不删除资源状态或预算。
+首次启动要求 Unix socket 实际可连接，残留路径不算就绪；调度服务退出仍终止入口。
+关闭只回收自建子进程，容量锁最终释放。修改监督路径还须运行
+`python3 -m unittest discover -s deploy/standalone -p test_scheduler_supervision.py -v`。
+自有进程检查不证明已部署夹具具备相同行为，也不替代沙箱与资源预算物理验收。
 展开后的 Coordinator 配置使用 `host_budgets.BareMetal1` 持久保存同一固定容量和实际节点 ID。
 模板只允许一个 Coordinator 和一个节点；不能从节点标签或主机瞬时空闲量生成容量。
 节点观测过期仅关闭新准入，不删除持久占用。匹配的 agent-dx 必须支持宿主预算配置；

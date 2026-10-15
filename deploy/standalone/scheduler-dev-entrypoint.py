@@ -8,6 +8,8 @@ from pathlib import Path
 import secrets
 import shutil
 import signal
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -252,19 +254,128 @@ def prepare_config(templates=Path("/etc/akernel/dev-templates"),
     subprocess.run([adxctl, "--config", str(output), "validate"], check=True)
 
 
+class SandboxdSupervisor:
+    """只在原有子进程已退出后重启 sandboxd，保持其他服务及持久目录。"""
+
+    def __init__(self, argv, env):
+        self.argv = list(argv)
+        self.env = dict(env)
+        self.process = None
+        self.next_start = 0
+        self.started_at = 0
+        self.restart_delay = 1.0
+        self.closed = False
+
+    def tick(self):
+        if self.closed:
+            return
+        now = time.monotonic()
+        if self.process is not None:
+            code = self.process.poll()
+            if code is None:
+                if now - self.started_at >= 60:
+                    self.restart_delay = 1.0
+                return
+            print(f"sandboxd 已退出，退出码为 {code}，将按退避间隔重启。",
+                  file=sys.stderr, flush=True)
+            self.process = None
+            self.next_start = now + self.restart_delay
+            self.restart_delay = min(30.0, self.restart_delay * 2)
+        if now < self.next_start:
+            return
+        try:
+            self.process = subprocess.Popen(self.argv, env=self.env)
+        except OSError:
+            print("sandboxd 暂时无法启动，保留其他服务并等待下次重试。",
+                  file=sys.stderr, flush=True)
+            self.next_start = now + self.restart_delay
+            self.restart_delay = min(30.0, self.restart_delay * 2)
+        else:
+            self.started_at = time.monotonic()
+
+    def close(self):
+        self.closed = True
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=100)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError("sandboxd 未正常结束，保留环境用于检查") from error
+
+
+def socket_available(path):
+    """拒绝残留的 socket 文件，只接受当前可连接的 Unix 监听端点。"""
+    try:
+        if not stat.S_ISSOCK(path.lstat().st_mode):
+            return False
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.1)
+            probe.connect(str(path))
+        return True
+    except OSError:
+        return False
+
+
+def run_services(daemon_argv, daemon_env, capacity_lease, stop_requested, *,
+                 service_argv=None, socket_path=None, startup_timeout=90,
+                 capacity_refresh_seconds=CAPACITY_REFRESH_SECONDS,
+                 poll_seconds=0.1):
+    """让容量续期与守护进程恢复独立推进，不清除任何物理操作账本。"""
+    if service_argv is None:
+        service_argv = ["/usr/local/bin/adx-service", "run"]
+    if socket_path is None:
+        socket_path = Path("/run/sandboxd/sandboxd.sock")
+    daemon = SandboxdSupervisor(daemon_argv, daemon_env)
+    service = None
+    deadline = time.monotonic() + startup_timeout
+    next_capacity_refresh = 0
+    try:
+        while not stop_requested():
+            if service is not None and service.poll() is not None:
+                raise RuntimeError("调度服务意外退出，保留环境用于检查")
+            daemon.tick()
+            now = time.monotonic()
+            if now >= next_capacity_refresh:
+                try:
+                    capacity_lease.renew()
+                except (OSError, RuntimeError):
+                    print("固定容量无法续期，等待原观测过期并关闭新任务准入。",
+                          file=sys.stderr, flush=True)
+                next_capacity_refresh = now + capacity_refresh_seconds
+            if service is None:
+                if (daemon.process is not None and daemon.process.poll() is None
+                        and socket_available(socket_path)):
+                    service = subprocess.Popen(service_argv)
+                elif now >= deadline:
+                    raise RuntimeError("sandboxd 未在期限内提供服务")
+            time.sleep(poll_seconds)
+    finally:
+        # 每次只管理自己创建的当前子进程；先停止调度服务，再关闭守护进程。
+        try:
+            if service is not None and service.poll() is None:
+                service.terminate()
+                try:
+                    service.wait(timeout=100)
+                except subprocess.TimeoutExpired as error:
+                    raise RuntimeError("调度服务未正常结束，保留环境用于检查") from error
+        finally:
+            try:
+                daemon.close()
+            finally:
+                capacity_lease.close()
+
+
 def main():
     elastic_memory = elastic_memory_enabled()
     prepare_cgroup()
     prepare_config(elastic_memory=elastic_memory)
     capacity_lease = FixedCapacityLease()
-    subprocess.run(["/usr/local/bin/sandboxd-network-prepare"], check=True)
-    (STATE / "logs/sandboxd").mkdir(parents=True, exist_ok=True)
-    daemon = subprocess.Popen([
-        "/usr/local/bin/sandboxd", "-config", str(STATE / "sandboxd/config.toml"),
-        "-socket", "/run/sandboxd/sandboxd.sock", "-log-level", "info",
-        "-log-file", str(STATE / "logs/sandboxd/sandboxd.log"),
-    ], env=dict(os.environ, GOMEMLIMIT="1GiB", GOGC="100"))
-    children = [daemon]
+    try:
+        subprocess.run(["/usr/local/bin/sandboxd-network-prepare"], check=True)
+        (STATE / "logs/sandboxd").mkdir(parents=True, exist_ok=True)
+    except BaseException:
+        capacity_lease.close()
+        raise
     stopped = False
 
     def stop(_signum, _frame):
@@ -273,37 +384,12 @@ def main():
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    try:
-        deadline = time.monotonic() + 90
-        while not Path("/run/sandboxd/sandboxd.sock").exists():
-            if stopped or daemon.poll() is not None or time.monotonic() >= deadline:
-                raise RuntimeError("sandboxd 未在期限内提供服务")
-            time.sleep(0.25)
-        children.append(subprocess.Popen(["/usr/local/bin/adx-service", "run"]))
-        next_capacity_refresh = 0
-        while not stopped:
-            if any(child.poll() is not None for child in children):
-                raise RuntimeError("开发环境服务意外退出")
-            if time.monotonic() >= next_capacity_refresh:
-                try:
-                    capacity_lease.renew()
-                except (OSError, RuntimeError):
-                    # Keep existing executions and reconciliation alive. The
-                    # previous observation expires instead of granting capacity.
-                    print("固定容量无法续期，等待原观测过期并关闭新任务准入",
-                          file=sys.stderr, flush=True)
-                next_capacity_refresh = time.monotonic() + CAPACITY_REFRESH_SECONDS
-            time.sleep(0.5)
-    finally:
-        # 先让调度服务结束，再终止 daemon；不删除物理状态或清空账本。
-        for child in reversed(children):
-            if child.poll() is None:
-                child.terminate()
-                try:
-                    child.wait(timeout=100)
-                except subprocess.TimeoutExpired:
-                    raise RuntimeError("服务未正常结束，保留环境用于检查")
-        capacity_lease.close()
+    run_services([
+        "/usr/local/bin/sandboxd", "-config", str(STATE / "sandboxd/config.toml"),
+        "-socket", "/run/sandboxd/sandboxd.sock", "-log-level", "info",
+        "-log-file", str(STATE / "logs/sandboxd/sandboxd.log"),
+    ], dict(os.environ, GOMEMLIMIT="1GiB", GOGC="100"), capacity_lease,
+        lambda: stopped, capacity_refresh_seconds=CAPACITY_REFRESH_SECONDS)
 
 
 if __name__ == "__main__":

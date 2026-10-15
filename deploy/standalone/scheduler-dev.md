@@ -35,3 +35,17 @@ sandboxd `[plugin.resource]` 的 `memory_high_ratio=0.75`，冲突配置拒绝�
 该启动器仍只管理原有单节点开发环境，不能用开关修改已经存在的双节点测试容器。
 部署前还应运行 `python3 -m unittest discover -s deploy/standalone -p test_scheduler_memory.py -v`。
 生产控制程序、静态 Execd、SDK、平台入口与 sandboxd 字节必须在版本台账中匹配。
+
+开发入口只在原有 sandboxd 子进程已经退出并被回收后，以相同命令和环境重新启动它。
+重试间隔从一秒指数增加到最多三十秒，连续存活六十秒后重置。恢复期间保持原来的
+`adx-service` 及容量来源检查，不删除物理状态、资源操作日志或持久预算；续期失败
+仍等待原容量观测过期。首次启动只有 Unix socket 实际可连接后才启动调度服务，
+残留 socket 文件不能作为就绪证据。传输可连接不等于资源对账或应用恢复已经通过。
+关闭时不再开始下一轮重试，并按调度服务、当前 sandboxd 的顺序回收自己创建的子进程。
+调度服务意外退出仍终止开发入口；此逻辑不检测仍存活但无响应的守护进程。
+
+运行 `python3 -m unittest discover -s deploy/standalone -p test_scheduler_supervision.py -v`
+验证真实自有子进程自行异常退出后的恢复、原控制进程与心跳连续性、容量续期失败、残留 socket 拒绝、
+启动失败退避、调度服务失败和关闭边界。修改源码不会改变已经运行的旧容器或双节点
+夹具。后者必须显式接入同一监督逻辑并重新冻结部署输入，随后独立验收原沙箱、资源
+代际、操作及预算的恢复，才能声称实际 sandboxd 故障门通过。
