@@ -32,6 +32,8 @@ from ._resource_api import (
     parse_resource_nodes,
     query_resource_view,
 )
+from ._tls import create_ssl_context as _create_ssl_context
+from ._tls import verification_from_env
 from .pty import Pty, PtyError
 
 DEFAULT_COMMAND = "/bin/bash"
@@ -53,14 +55,6 @@ def _get_endpoint(configure) -> Endpoint:
     except RuntimeError as error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
-
-
-def _create_ssl_context() -> ssl.SSLContext:
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    return context
 
 
 def _make_get_request(url: str, token: str, ssl_context: ssl.SSLContext) -> dict:
@@ -407,7 +401,7 @@ def handle_delete(instance_ids: list[str]) -> None:
     for instance_id in instance_ids:
         try:
             result = _make_delete_request(
-                f"{endpoint.base_url()}/api/sandbox/v1/sandboxes/"
+                f"{endpoint.base_url()}/api/environment/v1/environments/"
                 f"{quote(instance_id, safe='')}",
                 token,
                 ssl_context,
@@ -528,6 +522,16 @@ def handle_exec(instance_id: str, command: str | Sequence[str]) -> int:
 
 def main():
     parser = argparse.ArgumentParser(prog="ak", description="AKernel SDK CLI")
+    parser.add_argument(
+        "--verify-tls",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="verify HTTPS/WSS certificates (env: AKERNEL_VERIFY_TLS; default: off)",
+    )
+    parser.add_argument(
+        "--ca-file",
+        help="trusted PEM CA/certificate bundle; enables TLS verification",
+    )
     sub = parser.add_subparsers(dest="command")
 
     resources_parser = sub.add_parser(
@@ -566,6 +570,18 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.ca_file:
+        if args.verify_tls is False:
+            parser.error("--ca-file cannot be combined with --no-verify-tls")
+        os.environ["SSL_CERT_FILE"] = args.ca_file
+        os.environ["AKERNEL_VERIFY_TLS"] = "1"
+    elif args.verify_tls is not None:
+        os.environ["AKERNEL_VERIFY_TLS"] = "1" if args.verify_tls else "0"
+    try:
+        verification_from_env()
+    except ValueError as error:
+        parser.error(str(error))
 
     if args.command is None:
         parser.print_help()

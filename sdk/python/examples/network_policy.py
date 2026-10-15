@@ -45,7 +45,12 @@ def assert_connection_denied(sandbox: Sandbox, command: str, timeout: int) -> No
     try:
         result = sandbox.commands.run(command, timeout=timeout)
     except BackendOperationError as error:
-        assert "timed out" in str(error).lower(), error
+        cause = error.__cause__
+        processing_deadline = (
+            getattr(cause, "status_code", None) == 504
+            and getattr(cause, "code", None) == "PROCESSING_DEADLINE_EXCEEDED"
+        )
+        assert "timed out" in str(error).lower() or processing_deadline, error
     else:
         assert result.exit_code != 0
 

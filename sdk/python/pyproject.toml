@@ -28,7 +28,7 @@ classifiers = [
     "Topic :: System :: Distributed Computing",
 ]
 dependencies = [
-    "adx-sandbox==0.1.0rc2",
+    "adx-environment==0.1.0rc1",
     "idna>=3,<4",
     "websockets>=10.0",
     "dockerfile-parse>=2.0.1",
@@ -78,7 +78,7 @@ warn_unused_ignores = true
 exclude = ["akernel_sdk/_instance.py"]
 
 [[tool.mypy.overrides]]
-module = ["adx_sandbox", "adx_sandbox.*", "yr_sandbox", "yr_sandbox.*"]
+module = ["adx_environment", "adx_environment.*", "yr_sandbox", "yr_sandbox.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

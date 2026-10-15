@@ -24,6 +24,7 @@ class Case:
     command: tuple[str, ...]
     timeout_seconds: int
     env: tuple[tuple[str, str], ...] = ()
+    minimum_budget_seconds: int = 1
 
 
 CASES = (
@@ -200,6 +201,13 @@ CASES = (
             "tests.e2e.full.test_scheduler_admin.SchedulerAdminIntegrationTest.test_administrator_pause_and_resume_preserves_running_sandbox",
         ),
         180,
+    ),
+    Case(
+        "fault-runc-delete-retry",
+        "full",
+        ("-m", "unittest", "-v", "tests.e2e.fault.test_runc_delete_retry"),
+        360,
+        minimum_budget_seconds=120,
     ),
     Case(
         "fault-process-restart",
@@ -447,7 +455,7 @@ def main() -> int:
         if args.case and case.name not in args.case:
             continue
         remaining = deadline - time.monotonic()
-        if remaining < 1:
+        if remaining < case.minimum_budget_seconds:
             results.append(
                 {"name": case.name, "level": case.level, "status": "budget-exhausted"}
             )
@@ -457,6 +465,7 @@ def main() -> int:
         started = time.monotonic()
         print(f"START {case.level}/{case.name} timeout={timeout:.0f}s", flush=True)
         environment = _case_environment(root, case.env)
+        environment["AKERNEL_E2E_DEADLINE_MONOTONIC"] = str(time.monotonic() + timeout)
         with log_path.open("w", encoding="utf-8") as log:
             try:
                 completed = subprocess.run(

@@ -107,7 +107,7 @@ class StartScriptTest(unittest.TestCase):
             command = (
                 f"source {SCRIPT!s}; "
                 f"TOKEN_FILE={token!s}; "
-                "probe_adx_capacity https://127.0.0.1:8443/api/sandbox/v1/resources"
+                "probe_adx_capacity https://127.0.0.1:8443/api/environment/v1/resources"
             )
 
             for payload, expected in (
@@ -142,7 +142,7 @@ class StartScriptTest(unittest.TestCase):
             command = (
                 f"source {SCRIPT!s}; "
                 "probe_adx_data_listener "
-                "http://127.0.0.1:8080/api/sandbox/v1/resources"
+                "http://127.0.0.1:8080/api/environment/v1/resources"
             )
 
             for status, expected in (("426", 0), ("200", 1), ("000", 1)):

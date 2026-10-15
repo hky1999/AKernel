@@ -255,7 +255,7 @@ case_enabled() {
   [[ ",${cases}," == *",$1,"* ]]
 }
 case_enabled health && run_case health "http://${server_pod_ip}:18080/healthz" none text
-case_enabled resources && run_case resources "${control_base}/api/sandbox/v1/resources" bearer json-object
+case_enabled resources && run_case resources "${control_base}/api/environment/v1/resources" bearer json-object
 case_enabled instances && run_case instances "${control_base}/api/instances" bearer json-array
 case_enabled scheduling-queue && run_case scheduling-queue "${control_base}/global-scheduler/scheduling_queue" bearer json-object
 

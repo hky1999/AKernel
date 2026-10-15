@@ -15,6 +15,16 @@ which owns availability and compatibility checks. The bundled deployment also
 advertises Kata Containers and Firecracker on KVM-capable nodes. The native
 Linux runc payload is build-time optional and must be explicitly included and
 enabled by an operator.
+SDK service certificate verification is configured with `AKERNEL_VERIFY_TLS`
+(default off); private trust uses `SSL_CERT_FILE`. The `ak` CLI supports global
+`--verify-tls` / `--no-verify-tls` and `--ca-file` options. Keep SDK connection,
+PTY, inventory and resource-query TLS policy consistent through `_tls.py`.
+Trust-source loading follows the underlying transport: HTTPX explicitly loads
+`SSL_CERT_FILE` ahead of `SSL_CERT_DIR`, while Python SSL/OpenSSL paths use
+default trust paths and can validate through a CA directory despite an invalid
+file. `--ca-file` sets the trust-file environment variable rather than selecting
+an exclusive trust store. Preserve this documented distinction and its real
+TLS regression coverage; the SDK README owns the detailed contract.
 Creation-time network policies and atomic runtime replacement support
 unrestricted networking, blocking new flows except the control-plane and
 published sandbox-port routes, or denying exact and leading-wildcard DNS names.
@@ -44,7 +54,7 @@ tunnels. The project overview and deployment quick start are in
 - `deploy/` - Helm charts, standalone scripts, Terraform modules, and deployment helper scripts.
 - `deploy/standalone/manage.py` - source-build standalone lifecycle shared by Linux and Apple Silicon Mac with OrbStack.
 - `assets/` - static images used by the root README.
-- `src/agent-dx/` - Agent DX source pinned to the upstream release commit by a Git submodule.
+- `src/agent-dx/` - Agent DX source pinned to the packaged build commit by a Git submodule.
 
 The open-source AKernel repository contains the SDK, deployment configuration,
 build tooling, and examples. Node runtime components such as `sandboxd` and
@@ -56,7 +66,12 @@ source reference, not a build input. See the Build section below for runtime
 payloads.
 
 ADX platform and Execd binaries come from the release archives pinned in the
-Dockerfiles; `src/agent-dx/` provides the tagged source for inspection.
+Dockerfiles; `src/agent-dx/` provides the matching artifact build source for
+inspection.
+The internal adapter uses `adx-environment==0.1.0rc1` and
+`/api/environment/v1`, while AKernel retains its public `Sandbox` API.
+Keep source installation, CI and publication dependency resolution through
+the configured package index.
 
 ## Common Commands
 

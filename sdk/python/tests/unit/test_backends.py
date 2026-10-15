@@ -49,7 +49,7 @@ class RegistryTest(unittest.TestCase):
             patch.object(registry, "_is_installed", return_value=True) as installed,
         ):
             self.assertEqual(registry._select_backend(), "adx")
-        installed.assert_called_once_with("adx-sandbox")
+        installed.assert_called_once_with("adx-environment")
 
     def test_invalid_explicit_backend_fails_during_selection(self):
         with (

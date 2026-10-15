@@ -2,7 +2,7 @@
 
 This benchmark measures foreground no-op command execution after Sandboxes are
 running. The measured request is the same raw route preferred by
-`adx-sandbox`:
+`adx-environment`:
 
 ```text
 POST /direct/{sandbox_id}/invoke

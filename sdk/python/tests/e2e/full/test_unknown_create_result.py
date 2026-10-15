@@ -19,7 +19,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from adx_sandbox._transport import SandboxClient, _CreateOutcomeUnknown
+from adx_environment._transport import EnvironmentClient, _CreateOutcomeUnknown
 
 from akernel_sdk import Sandbox
 
@@ -41,7 +41,7 @@ _RUNTIME = os.environ.get("AKERNEL_TEST_RUNTIME", "runsc")
 class UnknownCreateResultIntegrationTest(unittest.TestCase):
     def test_retry_after_lost_final_result_keeps_request_identity(self):
         name = f"e2e-unknown-{uuid.uuid4().hex[:12]}"
-        original = SandboxClient._create_info_attempt
+        original = EnvironmentClient._create_info_attempt
         requests: list[tuple[str, str]] = []
         confirmed_ids: list[str] = []
         discarded = False
@@ -56,9 +56,7 @@ class UnknownCreateResultIntegrationTest(unittest.TestCase):
                 request_id=request_id,
                 request_timeout=request_timeout,
             )
-            confirmed_ids.append(
-                str(result.get("sandboxId") or result.get("instanceId"))
-            )
+            confirmed_ids.append(str(result.get("environmentId")))
             if not discarded:
                 discarded = True
                 raise _CreateOutcomeUnknown(
@@ -67,13 +65,13 @@ class UnknownCreateResultIntegrationTest(unittest.TestCase):
                     code="OUTCOME_UNKNOWN",
                     retry="same_operation",
                     outcome="unknown",
-                    instance_id=name,
+                    environment_id=name,
                 )
             return result
 
         try:
             with patch.object(
-                SandboxClient, "_create_info_attempt", discard_first_result
+                EnvironmentClient, "_create_info_attempt", discard_first_result
             ):
                 sandbox = Sandbox(
                     name=name,

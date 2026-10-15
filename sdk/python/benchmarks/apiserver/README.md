@@ -14,7 +14,7 @@ The default cases separate four costs:
 | Case | Path | Measures |
 |---|---|---|
 | `health` | Pod health port `/healthz` | generator, cluster network, and HTTP server ceiling |
-| `resources` | `/api/sandbox/v1/resources` | TLS, bearer authentication, API routing, and cached node-directory serialization |
+| `resources` | `/api/environment/v1/resources` | TLS, bearer authentication, API routing, and cached node-directory serialization |
 | `instances` | `/api/instances` | TLS, bearer authentication, and cached ownership-directory reads |
 | `scheduling-queue` | `/global-scheduler/scheduling_queue` | TLS/auth plus API Server to Coordinator RPC |
 

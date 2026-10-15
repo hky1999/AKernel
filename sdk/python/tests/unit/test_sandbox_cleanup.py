@@ -20,9 +20,9 @@ import unittest
 import weakref
 from unittest.mock import MagicMock, patch
 
-import adx_sandbox
-from adx_sandbox._http_pool import _SHARED_HTTP_CLIENT_REGISTRY
-from adx_sandbox._transport import SandboxClient
+import adx_environment
+from adx_environment._http_pool import _SHARED_HTTP_CLIENT_REGISTRY
+from adx_environment._transport import EnvironmentClient
 
 from akernel_sdk import Sandbox
 from akernel_sdk import sandbox as sandbox_module
@@ -48,9 +48,9 @@ def _gc_probe():
                 patch.object(sandbox_module, "load_backend", return_value=backend),
                 patch.object(adapter._CommandsDriver, "list", return_value=[]),
                 patch.object(
-                    SandboxClient,
+                    EnvironmentClient,
                     "create_info",
-                    return_value={"sandboxId": "gc-test", "status": "running"},
+                    return_value={"environmentId": "gc-test", "status": "running"},
                 ),
             ):
                 sandbox = Sandbox()
@@ -72,7 +72,7 @@ class SandboxCleanupTests(unittest.TestCase):
         native = MagicMock()
         native.id = "cleanup-test"
         backend = MagicMock()
-        connection = adx_sandbox.ConnectionConfig(
+        connection = adx_environment.ConnectionConfig(
             server_address="localhost:443", token="test"
         )
         backend.create.side_effect = lambda spec: adapter._Session(
@@ -95,7 +95,7 @@ class SandboxCleanupTests(unittest.TestCase):
     def test_delete_failure_closes_local_handle_and_remains_retryable(self):
         sandbox, native = self.make_sandbox()
         with patch.object(
-            adx_sandbox.Sandbox,
+            adx_environment.Environment,
             "delete",
             side_effect=[RuntimeError("remote delete failed"), None],
         ) as delete:
@@ -112,7 +112,7 @@ class SandboxCleanupTests(unittest.TestCase):
     def test_local_close_failure_still_deletes_and_does_not_repeat_delete(self):
         sandbox, native = self.make_sandbox()
         native.close.side_effect = RuntimeError("local close failed")
-        with patch.object(adx_sandbox.Sandbox, "delete") as delete:
+        with patch.object(adx_environment.Environment, "delete") as delete:
             with self.assertRaisesRegex(BackendOperationError, "local close failed"):
                 sandbox.kill()
             self.assertTrue(sandbox._session._terminated)
@@ -126,7 +126,7 @@ class SandboxCleanupTests(unittest.TestCase):
         native.close.side_effect = RuntimeError("local close failed")
         with (
             patch.object(
-                adx_sandbox.Sandbox,
+                adx_environment.Environment,
                 "delete",
                 side_effect=RuntimeError("remote delete failed"),
             ) as delete,
@@ -143,7 +143,7 @@ class SandboxCleanupTests(unittest.TestCase):
         workload_error = ValueError("workload failed")
         with (
             patch.object(
-                adx_sandbox.Sandbox,
+                adx_environment.Environment,
                 "delete",
                 side_effect=[RuntimeError("remote delete failed"), None],
             ) as delete,
@@ -161,7 +161,7 @@ class SandboxCleanupTests(unittest.TestCase):
         sandbox, _native = self.make_sandbox()
         with (
             patch.object(
-                adx_sandbox.Sandbox,
+                adx_environment.Environment,
                 "delete",
                 side_effect=RuntimeError("remote delete failed"),
             ),

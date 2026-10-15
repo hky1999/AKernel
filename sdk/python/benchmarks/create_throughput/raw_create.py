@@ -99,7 +99,7 @@ class _CreateClient:
         headers["Accept"] = "text/event-stream"
         headers["Content-Length"] = str(len(payload))
         self.connection.request(
-            "POST", "/api/sandbox/v1/sandboxes", body=payload, headers=headers
+            "POST", "/api/environment/v1/environments", body=payload, headers=headers
         )
         response = self.connection.getresponse()
         content = response.read()
@@ -116,7 +116,7 @@ class _CreateClient:
             result = json.loads(content)
         if not isinstance(result, dict) or result.get("status") != "running":
             raise RuntimeError(f"Sandbox create did not reach running: {result!r}")
-        if not (result.get("sandboxId") or result.get("instanceId")):
+        if not (result.get("environmentId")):
             raise RuntimeError("Sandbox create result has no Sandbox ID")
         return result
 
@@ -225,7 +225,7 @@ def run_create_phase(
                 request_id=f"create-{run_id}-{index}",
             )
             record = {
-                "sandbox_id": str(result.get("sandboxId") or result.get("instanceId")),
+                "sandbox_id": str(result.get("environmentId")),
                 "node_id": str(result.get("nodeId") or result.get("node_id") or ""),
             }
             latency = time.perf_counter() - started

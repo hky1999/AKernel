@@ -18,16 +18,16 @@ from __future__ import annotations
 
 import json
 import os
-import ssl
 from collections.abc import Mapping
 from typing import Any
 from urllib import request
 from urllib.error import HTTPError, URLError
 
 from ._addresses import api_endpoint_from_env
+from ._tls import create_ssl_context as _ssl_context
 from .types import NodeInfo
 
-RESOURCE_PATH = "/api/sandbox/v1/resources"
+RESOURCE_PATH = "/api/environment/v1/resources"
 
 
 class ResourceAPIError(RuntimeError):
@@ -37,14 +37,6 @@ class ResourceAPIError(RuntimeError):
         super().__init__(message)
         self.status = status
         self.body = body
-
-
-def _ssl_context() -> ssl.SSLContext:
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    return context
 
 
 def query_resource_view() -> dict[str, Any]:

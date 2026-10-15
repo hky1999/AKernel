@@ -23,7 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-import adx_sandbox
+import adx_environment
 
 from akernel_sdk import Sandbox
 from akernel_sdk._addresses import api_endpoint_from_env
@@ -89,7 +89,7 @@ class TenantIsolationIntegrationTest(unittest.TestCase):
                 )
             key_id, other_token = create_key()
         endpoint = api_endpoint_from_env()
-        return key_id, adx_sandbox.ConnectionConfig(
+        return key_id, adx_environment.ConnectionConfig(
             server_address=endpoint.authority(),
             token=other_token,
             use_tls=endpoint.use_tls,
@@ -100,8 +100,8 @@ class TenantIsolationIntegrationTest(unittest.TestCase):
         try:
             with Sandbox(runtime=_RUNTIME, cpu=1000, memory=2048) as sandbox:
                 self.assertTrue(sandbox.is_running())
-                with self.assertRaises(adx_sandbox.PermissionDenied):
-                    adx_sandbox.Sandbox.from_id(sandbox.id, connection=other)
+                with self.assertRaises(adx_environment.PermissionDenied):
+                    adx_environment.Environment.from_id(sandbox.id, connection=other)
         finally:
             if key_id is not None:
                 revoke_key(key_id)
@@ -110,8 +110,8 @@ class TenantIsolationIntegrationTest(unittest.TestCase):
         key_id, other = self._other_connection()
         try:
             with Sandbox(runtime=_RUNTIME, cpu=1000, memory=2048) as sandbox:
-                with self.assertRaises(adx_sandbox.PermissionDenied):
-                    adx_sandbox.Sandbox.delete(sandbox.id, connection=other)
+                with self.assertRaises(adx_environment.PermissionDenied):
+                    adx_environment.Environment.delete(sandbox.id, connection=other)
                 self.assertTrue(sandbox.is_running())
                 result = sandbox.commands.run("printf owner-still-running")
                 self.assertEqual(result.exit_code, 0, result.stderr)

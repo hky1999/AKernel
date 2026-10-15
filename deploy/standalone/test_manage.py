@@ -471,7 +471,7 @@ class ManageTest(unittest.TestCase):
         self.assertEqual(self.backend.curl_input, "X-Auth: fixture-private-token\n")
         curl = next(event for event in self.backend.events if event["args"][0] == "curl")
         self.assertIn("@-", curl["args"])
-        self.assertIn("https://127.0.0.1:24443/api/sandbox/v1/resources", curl["args"])
+        self.assertIn("https://127.0.0.1:24443/api/environment/v1/resources", curl["args"])
         self.assertNotIn(token.read_text().strip(), " ".join(curl["args"]))
         self.assertNotIn(token.read_text().strip(), self.stdout.getvalue() + self.stderr.getvalue())
 

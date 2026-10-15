@@ -39,7 +39,7 @@ class DirectIngressIntegrationTest(unittest.TestCase):
         opener = build_opener(
             ProxyHandler({}), HTTPSHandler(context=ssl._create_unverified_context())
         )
-        url = endpoint.base_url() + "/api/sandbox/v1/resources"
+        url = endpoint.base_url() + "/api/environment/v1/resources"
         with self.assertRaises(HTTPError) as denied:
             opener.open(url, timeout=10)
         self.assertEqual(denied.exception.code, 401)

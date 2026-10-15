@@ -38,7 +38,7 @@ _ENABLED = (
     and os.environ.get("AKERNEL_TEST_DESTRUCTIVE_CLAIMS") == "1"
 )
 _RUNTIME = os.environ.get("AKERNEL_TEST_RUNTIME", "runsc")
-_CREATE_PATH = "/api/sandbox/v1/sandboxes"
+_CREATE_PATH = "/api/environment/v1/environments"
 
 
 def _running_final_id(body: bytes) -> str | None:
@@ -53,7 +53,7 @@ def _running_final_id(body: bytes) -> str | None:
                 except json.JSONDecodeError:
                     return None
                 if result.get("status") == "running":
-                    return result.get("sandboxId") or result.get("instanceId")
+                    return result.get("environmentId")
             event = ""
             data_lines = []
         elif line.startswith("event:"):

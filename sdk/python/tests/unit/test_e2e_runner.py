@@ -237,6 +237,31 @@ class RedisAuditTest(unittest.TestCase):
             self.assertEqual(summary["campaign_spent_before_seconds"], 4.0)
             self.assertEqual(summary["results"][0]["status"], "budget-exhausted")
 
+    def test_fault_injection_does_not_start_with_insufficient_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.dict("os.environ", {"AKERNEL_RUN_INTEGRATION": "1"}, clear=True),
+                patch(
+                    "sys.argv",
+                    [
+                        "run.py",
+                        "--level",
+                        "full",
+                        "--case",
+                        "fault-runc-delete-retry",
+                        "--budget-seconds",
+                        "2",
+                        "--output",
+                        directory,
+                    ],
+                ),
+                patch("tests.e2e.run.subprocess.run") as launch,
+            ):
+                self.assertEqual(main(), 1)
+            launch.assert_not_called()
+            result = json.loads((Path(directory) / "summary.json").read_text())
+            self.assertEqual(result["results"][0]["status"], "budget-exhausted")
+
 
 if __name__ == "__main__":
     unittest.main()

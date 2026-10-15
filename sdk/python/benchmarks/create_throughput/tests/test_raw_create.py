@@ -30,7 +30,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length))
-        if self.path != "/api/sandbox/v1/sandboxes":
+        if self.path != "/api/environment/v1/environments":
             self._send(404, b"{}", "application/json")
             return
         sandbox_id = "default-" + body["name"]
@@ -41,7 +41,7 @@ class _Handler(BaseHTTPRequestHandler):
             'event: progress\ndata: {"status":"scheduling"}\n\n'
             "event: final\ndata: "
             + json.dumps(
-                {"status": "running", "sandboxId": sandbox_id, "nodeId": "node-a"}
+                {"status": "running", "environmentId": sandbox_id, "nodeId": "node-a"}
             )
             + "\n\n"
         ).encode()
@@ -68,7 +68,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(404, b"{}", "application/json")
 
     def do_DELETE(self) -> None:
-        prefix = "/api/sandbox/v1/sandboxes/"
+        prefix = "/api/environment/v1/environments/"
         if not self.path.startswith(prefix):
             self._send(404, b"{}", "application/json")
             return

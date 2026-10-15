@@ -121,9 +121,9 @@ class RawDirectTest(unittest.TestCase):
             b": keepalive\n\n"
             b'event: progress\ndata: {"status":"scheduling"}\n\n'
             b'event: final\ndata: {"status":"running",\n'
-            b'data: "sandboxId":"sandbox-1"}\n\n'
+            b'data: "environmentId":"sandbox-1"}\n\n'
         )
-        self.assertEqual(parse_final_event(payload)["sandboxId"], "sandbox-1")
+        self.assertEqual(parse_final_event(payload)["environmentId"], "sandbox-1")
         with self.assertRaisesRegex(ValueError, "final"):
             parse_final_event(b"event: progress\ndata: {}\n\n")
 

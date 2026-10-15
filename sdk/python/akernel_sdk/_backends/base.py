@@ -50,6 +50,7 @@ class BackendConfig:
     api_endpoint: Endpoint
     gateway_endpoint: Endpoint
     token: str = field(repr=False)
+    verify_tls: bool = False
 
 
 @dataclass(frozen=True)

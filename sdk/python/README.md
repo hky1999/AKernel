@@ -40,11 +40,14 @@ To install from source:
 python -m pip install ./sdk/python
 ```
 
-Source installs, CI, and AKernel SDK releases resolve the declared
-`adx-sandbox==0.1.0rc2` dependency from the configured Python package index.
-The dependency version is maintained in `pyproject.toml`. CI validates wheel
-and source distribution installs in separate clean environments, including
-`pip check`, imports, version checks, and the `ak` CLI.
+This source version depends on `adx-environment==0.1.0rc1`, maintained in
+`pyproject.toml`. The ADX adapter translates the public AKernel `Sandbox` API
+to `adx_environment.Environment`. Deploy a matching ADX release exposing
+`/api/environment/v1` for lifecycle, resources and command subscriptions.
+
+Source installs and CI resolve `adx-environment==0.1.0rc1` from PyPI.
+CI checks AKernel wheel and source distribution installs in separate clean
+environments, including `pip check`, imports, version checks, and the `ak` CLI.
 
 Configure the public AKernel entrypoint and the deployment token:
 
@@ -63,6 +66,74 @@ Address behavior is deterministic:
   tunnel data endpoint for nonstandard ports or TLS gateways. An override
   without a scheme uses HTTP/WS. Exec and file transfer continue to use
   `AKERNEL_SERVER_ADDRESS`.
+
+### TLS certificate verification
+
+`AKERNEL_VERIFY_TLS` controls certificate-chain and hostname verification for
+the SDK's HTTPS control, command and file requests, command-watch WebSockets,
+PTYs, CLI inventory/deletion and resource queries. It defaults to `0` to retain
+the current self-signed deployment behavior. HTTPS still encrypts the connection
+with this default, but does not authenticate the server certificate.
+
+For an entrypoint with a certificate trusted by the default certificate stores:
+
+```bash
+export AKERNEL_VERIFY_TLS=1
+```
+
+For a private CA or a standalone self-signed certificate, additionally configure
+the trusted PEM bundle before the first SDK operation:
+
+```bash
+export AKERNEL_VERIFY_TLS=1
+export SSL_CERT_FILE="/path/to/trusted-ca-or-certificate.pem"
+```
+
+The standalone operator can provide the existing
+`<data-directory>/adx/tls/ingress-public.pem` file. For Kubernetes, the operator
+can provide `public.pem` from the configured ADX TLS Secret. This is public
+certificate material; clients do not need the server's private key or the
+administrator API key to establish certificate trust. Use the hostname or IP
+listed in the certificate's subject alternative names. The default standalone
+certificate covers `localhost` and `127.0.0.1`; replace it with a certificate
+matching the public hostname for remote access.
+
+The CLI accepts global options before the subcommand:
+
+```bash
+ak --verify-tls list
+ak --ca-file /path/to/trusted-ca-or-certificate.pem resources
+ak --ca-file /path/to/trusted-ca-or-certificate.pem exec <sandbox-id>
+```
+
+`--ca-file` configures `SSL_CERT_FILE` and enables verification. The explicit
+`--no-verify-tls` option selects the existing unverified mode and cannot be
+combined with `--ca-file`. Environment boolean values accept `1/true/yes/on`
+and `0/false/no/off`; invalid values fail rather than disabling verification.
+
+CA loading follows the underlying transport when verification is enabled:
+
+| Transport | Trust-source contract |
+|---|---|
+| SDK control, command and file HTTP requests (HTTPX) | A nonempty `SSL_CERT_FILE` takes precedence over `SSL_CERT_DIR` and is loaded explicitly. A missing or malformed file raises an error during client construction, even if the directory contains a usable CA. If no file is selected, HTTPX uses `SSL_CERT_DIR` when set, otherwise its default CA bundle. |
+| CLI inventory/deletion, SDK resource queries, PTY and command-watch (Python SSL/OpenSSL) | Use OpenSSL's default trust paths, including `SSL_CERT_FILE` and `SSL_CERT_DIR`. A missing or malformed file can be ignored while a usable CA directory still validates the server. |
+
+`--ca-file` sets the process trust-file variable; it does not restrict all
+transports to that file as their sole trust source or guarantee an error for
+an invalid path. Check the selected PEM file before use. For a private CA,
+configure a valid file and unset `SSL_CERT_DIR` to avoid an additional
+environment-selected directory; OpenSSL can still use its default trust paths.
+These loading differences do not disable certificate-chain or hostname checks
+in verified mode. When verification is off, these service transports do not
+load the CA sources to authenticate the server.
+
+Verification failures do not fall back to unverified TLS. The process backend
+and dependency HTTP pools retain their configuration, so set trust and
+verification before first use; restart the client after changing CA material.
+
+Certificate issuance and renewal remain deployment responsibilities. Registry
+TLS, reverse-tunnel upstream HTTPS trust and SSH host keys have separate
+configuration; this setting controls the AKernel service connection.
 
 ## Create a sandbox
 

@@ -20,8 +20,8 @@ from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from adx_sandbox._transport import SandboxHTTPError
-from adx_sandbox.commands import Commands as NativeCommands
+from adx_environment._transport import EnvironmentHTTPError
+from adx_environment.commands import Commands as NativeCommands
 
 from akernel_sdk._addresses import Endpoint
 from akernel_sdk._backends import adx
@@ -103,9 +103,7 @@ class AdxBackendTest(unittest.TestCase):
             client.invoke.side_effect = invoke
             native.commands = NativeCommands(client, native.id, default_cwd=str(cwd))
             native.commands.list = MagicMock(return_value=[])
-            with patch.object(
-                adx, "_OwnedSandbox", return_value=native
-            ):
+            with patch.object(adx, "_OwnedSandbox", return_value=native):
                 session = adx.AdxBackend(self.config).create(
                     _spec(command_cwd=str(cwd))
                 )
@@ -127,18 +125,14 @@ class AdxBackendTest(unittest.TestCase):
     def test_existing_constructor_cwd_is_accepted(self):
         native = MagicMock()
         native.files.make_dir.return_value = False
-        with patch.object(
-            adx, "_OwnedSandbox", return_value=native
-        ):
+        with patch.object(adx, "_OwnedSandbox", return_value=native):
             adx.AdxBackend(self.config).create(_spec(command_cwd="/workspace"))
         native.files.make_dir.assert_called_once_with("/workspace")
         native.close.assert_not_called()
 
     def test_omitted_constructor_cwd_does_not_create_a_directory(self):
         native = MagicMock()
-        with patch.object(
-            adx, "_OwnedSandbox", return_value=native
-        ):
+        with patch.object(adx, "_OwnedSandbox", return_value=native):
             adx.AdxBackend(self.config).create(_spec())
         native.files.make_dir.assert_not_called()
 
@@ -148,10 +142,8 @@ class AdxBackendTest(unittest.TestCase):
         error = PermissionError("cannot create working directory")
         native.files.make_dir.side_effect = error
         with (
-            patch.object(
-                adx, "_OwnedSandbox", return_value=native
-            ),
-            patch.object(adx.adx_sandbox.Sandbox, "delete") as delete,
+            patch.object(adx, "_OwnedSandbox", return_value=native),
+            patch.object(adx.adx_environment.Environment, "delete") as delete,
             self.assertRaisesRegex(BackendOperationError, "cannot create") as raised,
         ):
             adx.AdxBackend(self.config).create(
@@ -167,10 +159,8 @@ class AdxBackendTest(unittest.TestCase):
         error = FileExistsError("working directory is a file")
         native.files.make_dir.side_effect = error
         with (
-            patch.object(
-                adx, "_OwnedSandbox", return_value=native
-            ),
-            patch.object(adx.adx_sandbox.Sandbox, "delete") as delete,
+            patch.object(adx, "_OwnedSandbox", return_value=native),
+            patch.object(adx.adx_environment.Environment, "delete") as delete,
             self.assertLogs(adx.logger, level="WARNING"),
             self.assertRaisesRegex(BackendOperationError, "is a file") as raised,
         ):
@@ -182,7 +172,7 @@ class AdxBackendTest(unittest.TestCase):
 
     def test_detached_pty_uses_the_backend_connection(self):
         backend = adx.AdxBackend(self.config)
-        with patch.object(adx.adx_sandbox, "Pty") as pty_type:
+        with patch.object(adx.adx_environment, "Pty") as pty_type:
             driver = backend.pty_for("default-worker")
         self.assertIs(driver, pty_type.return_value)
         pty_type.assert_called_once()
@@ -216,7 +206,7 @@ class AdxBackendTest(unittest.TestCase):
             stdout="",
             stderr="Command timed out after 1 seconds",
             exit_code=None,
-            status=adx.adx_sandbox.CommandStatus.TIMED_OUT,
+            status=adx.adx_environment.CommandStatus.TIMED_OUT,
             error_code=None,
             error_message=None,
         )
@@ -230,9 +220,12 @@ class AdxBackendTest(unittest.TestCase):
         driver = adx._CommandsDriver(native)
         driver.start("sleep 3", envs=None, cwd=None, stdin=False)
         handle.wait.return_value = SimpleNamespace(
-            stdout="partial", stderr="", exit_code=None,
-            status=adx.adx_sandbox.CommandStatus.RUNNING,
-            error_code="WAIT_TIMEOUT", error_message="process remains running",
+            stdout="partial",
+            stderr="",
+            exit_code=None,
+            status=adx.adx_environment.CommandStatus.RUNNING,
+            error_code="WAIT_TIMEOUT",
+            error_message="process remains running",
         )
         result = driver.wait(12, timeout=0.1)
         self.assertIsNone(result.exit_code)
@@ -252,7 +245,7 @@ class AdxBackendTest(unittest.TestCase):
             session = backend.create(_spec())
         native.commands.list.reset_mock()
         native.commands.list.side_effect = [
-            SandboxHTTPError(409, {}, "stale route"),
+            EnvironmentHTTPError(409, {}, "stale route"),
             [],
         ]
         native.reload.return_value = True
@@ -266,7 +259,7 @@ class AdxBackendTest(unittest.TestCase):
         with patch.object(adx, "_OwnedSandbox", return_value=native):
             session = backend.create(_spec())
         native.commands.list.reset_mock()
-        native.commands.list.side_effect = SandboxHTTPError(409, {}, "stale route")
+        native.commands.list.side_effect = EnvironmentHTTPError(409, {}, "stale route")
         native.reload.return_value = True
         with patch.object(adx.time, "monotonic", side_effect=[0, 10]):
             self.assertFalse(session.reload())
@@ -279,7 +272,7 @@ class AdxBackendTest(unittest.TestCase):
         with patch.object(adx, "_OwnedSandbox", return_value=native):
             session = backend.create(_spec())
         native.commands.list.reset_mock()
-        native.commands.list.side_effect = SandboxHTTPError(403, {}, "forbidden")
+        native.commands.list.side_effect = EnvironmentHTTPError(403, {}, "forbidden")
         native.reload.return_value = True
         self.assertFalse(session.reload())
         native.reload.assert_called_once_with()
@@ -288,8 +281,10 @@ class AdxBackendTest(unittest.TestCase):
     def test_create_waits_for_transient_route_503(self):
         backend = adx.AdxBackend(self.config)
         native = MagicMock(id="default-worker")
-        exhausted = adx.adx_sandbox.SandboxError("direct invoke outcome unknown")
-        exhausted.__cause__ = SandboxHTTPError(
+        exhausted = adx.adx_environment.EnvironmentError(
+            "direct invoke outcome unknown"
+        )
+        exhausted.__cause__ = EnvironmentHTTPError(
             503, {}, "route absent from synchronized cache"
         )
         native.commands.list.side_effect = [
@@ -299,7 +294,7 @@ class AdxBackendTest(unittest.TestCase):
         with (
             patch.object(adx, "_OwnedSandbox", return_value=native) as create,
             patch.object(adx.time, "sleep") as sleep,
-            patch.object(adx.adx_sandbox.Sandbox, "delete"),
+            patch.object(adx.adx_environment.Environment, "delete"),
         ):
             session = backend.create(_spec())
         self.assertEqual(session.id, "default-worker")
@@ -312,7 +307,7 @@ class AdxBackendTest(unittest.TestCase):
         backend = adx.AdxBackend(self.config)
         native = MagicMock(id="default-worker")
         native.commands.list.side_effect = [
-            SandboxHTTPError(503, {}, "route pending") for _ in range(6)
+            EnvironmentHTTPError(503, {}, "route pending") for _ in range(6)
         ] + [[]]
         with (
             patch.object(adx, "_OwnedSandbox", return_value=native) as create,
@@ -331,7 +326,9 @@ class AdxBackendTest(unittest.TestCase):
     def test_create_route_backoff_stops_at_existing_deadline(self):
         backend = adx.AdxBackend(self.config)
         native = MagicMock(id="default-worker")
-        native.commands.list.side_effect = SandboxHTTPError(503, {}, "route pending")
+        native.commands.list.side_effect = EnvironmentHTTPError(
+            503, {}, "route pending"
+        )
         clock = [0.0]
         sleeps = []
 
@@ -343,7 +340,7 @@ class AdxBackendTest(unittest.TestCase):
             patch.object(adx, "_OwnedSandbox", return_value=native) as create,
             patch.object(adx.time, "monotonic", side_effect=lambda: clock[0]),
             patch.object(adx.time, "sleep", side_effect=advance),
-            patch.object(adx.adx_sandbox.Sandbox, "delete"),
+            patch.object(adx.adx_environment.Environment, "delete"),
         ):
             with self.assertRaises(BackendOperationError):
                 backend.create(_spec())
@@ -356,11 +353,11 @@ class AdxBackendTest(unittest.TestCase):
     def test_create_does_not_retry_terminal_route_error(self):
         backend = adx.AdxBackend(self.config)
         native = MagicMock(id="default-worker")
-        native.commands.list.side_effect = SandboxHTTPError(403, {}, "forbidden")
+        native.commands.list.side_effect = EnvironmentHTTPError(403, {}, "forbidden")
         with (
             patch.object(adx, "_OwnedSandbox", return_value=native),
             patch.object(adx.time, "sleep") as sleep,
-            patch.object(adx.adx_sandbox.Sandbox, "delete"),
+            patch.object(adx.adx_environment.Environment, "delete"),
         ):
             with self.assertRaises(BackendOperationError):
                 backend.create(_spec())
@@ -421,7 +418,7 @@ class AdxBackendTest(unittest.TestCase):
             )
 
         kwargs = sandbox.call_args.kwargs
-        self.assertIsInstance(kwargs["rootfs"], adx.adx_sandbox.S3Config)
+        self.assertIsInstance(kwargs["rootfs"], adx.adx_environment.S3Config)
         self.assertEqual(kwargs["runtime"], "firecracker")
         self.assertEqual(kwargs["cpu"], 2000)
         self.assertEqual(kwargs["memory"], 8192)
@@ -445,8 +442,8 @@ class AdxBackendTest(unittest.TestCase):
         self.assertEqual(kwargs["data_plane_security"].tunnel_mode, "tls")
         self.assertEqual(kwargs["data_plane_security"].port_forward_mode, "tls")
         self.assertIs(kwargs["connection"], backend._connection)
-        self.assertIsInstance(kwargs["mounts"][0], adx.adx_sandbox.Mount)
-        self.assertIsInstance(kwargs["network"], adx.adx_sandbox.NetworkPolicy)
+        self.assertIsInstance(kwargs["mounts"][0], adx.adx_environment.Mount)
+        self.assertIsInstance(kwargs["network"], adx.adx_environment.NetworkPolicy)
         self.assertEqual(session.id, "default-worker")
         native.commands.list.assert_called_once_with()
 
@@ -459,7 +456,7 @@ class AdxBackendTest(unittest.TestCase):
 
         with (
             patch.object(adx, "_OwnedSandbox", return_value=native),
-            patch.object(adx.adx_sandbox, "Pty") as pty,
+            patch.object(adx.adx_environment, "Pty") as pty,
         ):
             session = backend.create(_spec())
 
@@ -478,7 +475,7 @@ class AdxBackendTest(unittest.TestCase):
         native.files = MagicMock()
         with (
             patch.object(adx, "_OwnedSandbox", return_value=native),
-            patch.object(adx.adx_sandbox.Sandbox, "delete") as delete,
+            patch.object(adx.adx_environment.Environment, "delete") as delete,
         ):
             session = backend.create(_spec())
             session.terminate()
@@ -529,7 +526,7 @@ class AdxBackendTest(unittest.TestCase):
 
     def test_delete_named_uses_default_namespace_and_explicit_connection(self):
         backend = adx.AdxBackend(self.config)
-        with patch.object(adx.adx_sandbox.Sandbox, "delete") as delete:
+        with patch.object(adx.adx_environment.Environment, "delete") as delete:
             backend.delete_named("worker")
 
         delete.assert_called_once_with(

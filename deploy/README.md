@@ -28,20 +28,15 @@ make print-env
 make e2e
 ```
 
-The node image installs the ADX `v0.1.0rc1` Linux AMD64 package from
-[Buildkite #152](https://buildkite.com/agent-dx/agent-dx/builds/152), commit
-`9a7924658fbcf04a34d76bfcecb0935ed850923a`. Both Dockerfiles pin the immutable
-OBS build path and archive SHA-256. The node build runs the release's
-`install.sh`, which also verifies its internal manifest. The runtime build
-uses the independent `adx-execd` archive from the same build to produce
-AKernel's own runtime rootfs; it does not use the prebuilt ADX runtime image.
-The refreshed platform release retains `v0.1.0rc1`; the SDK dependency is
-`adx-sandbox==0.1.0rc2` from the configured Python package index.
+The SDK depends on `adx-environment==0.1.0rc1` and uses `/api/environment/v1`.
+The public `akernel_sdk.Sandbox` API retains its existing names. Source
+installs resolve the declared dependency from PyPI.
+See [image build downloads](../builder/README.md#environment-api-source-builds)
+for platform and Execd archive pins, source validation and download overrides.
 
 When advancing ADX, update the URL, checksum and `ADX_VERSION` in both
-Dockerfiles together. The CI contract checks matching build paths and release
-labels, immutable URL format, checksum pins and verification commands. A
-release tag alone is insufficient to identify a refreshed prerelease archive.
+Dockerfiles together. Keep the platform and Execd archives from the same
+release and verify their checksums before building.
 
 The Collector archive URL and SHA-256 are also pinned in `builder/node.Dockerfile`.
 Upstream's `v0.120.0` archive contains the Collector Contrib `0.120.1` binary;

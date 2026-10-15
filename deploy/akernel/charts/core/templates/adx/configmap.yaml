@@ -101,7 +101,7 @@ data:
           ADX_TRACE_SAMPLE_RATIO: "0.1"
           OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:4318
           {{- end }}
-          ADX_DATA_PLANE_INGRESS_CONTROL_PLANE_ROUTES: exact:/,exact:/healthz,prefix:/api/instances,prefix:/api/sandbox,prefix:/api/admin/v1/keys,prefix:/global-scheduler
+          ADX_DATA_PLANE_INGRESS_CONTROL_PLANE_ROUTES: exact:/,exact:/healthz,prefix:/api/instances,prefix:/api/environment,prefix:/api/admin/v1/keys,prefix:/global-scheduler
           ADX_DATA_PLANE_INGRESS_TLS_BIND: 0.0.0.0:8443
           ADX_DATA_PLANE_INGRESS_PLAIN_BIND: 0.0.0.0:8080
           ADX_DATA_PLANE_INGRESS_HEALTH_BIND: 0.0.0.0:18080

@@ -242,7 +242,7 @@ class Manager:
             if not token or "\n" in token or "\r" in token:
                 raise Failure("invalid deployment token; status was not probed")
             self.capture("curl", "--noproxy", "*", "-fkSs", "--max-time", "5",
-                         "--header", "@-", f"https://{address}/api/sandbox/v1/resources",
+                         "--header", "@-", f"https://{address}/api/environment/v1/resources",
                          input_text=f"X-Auth: {token}\n")
             print(f"Gateway: https://{address} (healthy)\nSDK environment: {self.data / 'sdk-env.sh'}")
         elif owned:

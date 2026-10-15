@@ -275,8 +275,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(
             [call.args[0] for call in make_request.call_args_list],
             [
-                "https://akernel.example/api/sandbox/v1/sandboxes/sandbox-1",
-                "https://akernel.example/api/sandbox/v1/sandboxes/sandbox-2",
+                "https://akernel.example/api/environment/v1/environments/sandbox-1",
+                "https://akernel.example/api/environment/v1/environments/sandbox-2",
             ],
         )
         self.assertEqual(

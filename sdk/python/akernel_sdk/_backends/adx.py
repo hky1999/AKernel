@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Adapter for the frontend/RRT ``adx-sandbox`` backend."""
+"""Adapter for the API Server/Execd ``adx-environment`` backend."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-import adx_sandbox
+import adx_environment
 
 from ..types import (
     CommandInfo,
@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 def _control_pty_connection(connection: Any) -> Any:
     """PTY direct routing uses the control TLS entrypoint, not the data port."""
 
-    return adx_sandbox.ConnectionConfig(
+    return adx_environment.ConnectionConfig(
         server_address=connection.server_address,
         token=connection.token,
         use_tls=connection.use_tls,
@@ -65,18 +65,18 @@ def _native_port_range(value: PortRange | int | None) -> Any:
     if value is None:
         return None
     assert isinstance(value, PortRange)
-    return adx_sandbox.PortRange(first=value.first, last=value.last)
+    return adx_environment.PortRange(first=value.first, last=value.last)
 
 
 def _native_network_rule(rule: NetworkRule) -> Any:
-    return adx_sandbox.NetworkRule(
+    return adx_environment.NetworkRule(
         action=rule.action,
         direction=rule.direction,
         protocol=rule.protocol,
         cidr=rule.cidr,
         domain=rule.domain,
         port_range=_native_port_range(rule.port_range),
-        sandbox_port_range=_native_port_range(rule.sandbox_port_range),
+        environment_port_range=_native_port_range(rule.sandbox_port_range),
         priority=rule.priority,
     )
 
@@ -84,7 +84,7 @@ def _native_network_rule(rule: NetworkRule) -> Any:
 def _native_traffic_policy(policy: TrafficPolicy | None) -> Any:
     if policy is None:
         return None
-    return adx_sandbox.TrafficPolicy(
+    return adx_environment.TrafficPolicy(
         ingress_default_action=policy.ingress_default_action,
         egress_default_action=policy.egress_default_action,
         rules=tuple(_native_network_rule(rule) for rule in policy.rules),
@@ -93,20 +93,20 @@ def _native_traffic_policy(policy: TrafficPolicy | None) -> Any:
 
 
 def _native_dns_rule(rule: DNSRule) -> Any:
-    return adx_sandbox.DNSRule(pattern=rule.pattern, action=rule.action)
+    return adx_environment.DNSRule(pattern=rule.pattern, action=rule.action)
 
 
 def _native_dns_policy(policy: DNSPolicy | None) -> Any:
     if policy is None:
         return None
-    return adx_sandbox.DNSPolicy(
+    return adx_environment.DNSPolicy(
         default_action=policy.default_action,
         rules=tuple(_native_dns_rule(rule) for rule in policy.rules),
     )
 
 
 def _native_network_policy(policy: NetworkPolicy) -> Any:
-    return adx_sandbox.NetworkPolicy(
+    return adx_environment.NetworkPolicy(
         block_network=policy.block_network,
         dns_blacklist=policy.dns_blacklist,
         traffic=_native_traffic_policy(policy.traffic),
@@ -124,7 +124,7 @@ def _route_read_retryable(error: Exception) -> bool:
         if cause is None:
             break
         if (
-            isinstance(cause, adx_sandbox.SandboxError)
+            isinstance(cause, adx_environment.EnvironmentError)
             and getattr(cause, "status_code", None) in (409, 503)
         ):
             return getattr(cause, "retry", None) != "never"
@@ -149,7 +149,7 @@ def _command_timeout_message(value: Any, timeout: int) -> str | None:
     error_code = getattr(value, "error_code", None)
     stderr = str(getattr(value, "stderr", ""))
     if not (
-        status == adx_sandbox.CommandStatus.TIMED_OUT
+        status == adx_environment.CommandStatus.TIMED_OUT
         or error_code in ("COMMAND_TIMEOUT", "WAIT_TIMEOUT")
         or (
             getattr(value, "exit_code", None) == -1
@@ -341,7 +341,7 @@ class _Session:
         self.id = str(sandbox.id)
         self.commands = _CommandsDriver(sandbox.commands)
         self.files = _FilesystemDriver(sandbox.files)
-        self.pty = adx_sandbox.Pty(
+        self.pty = adx_environment.Pty(
             self.id, connection=_control_pty_connection(connection)
         )
         self._sandbox = sandbox
@@ -391,7 +391,7 @@ class _Session:
                 try:
                     self._sandbox.commands.list()
                     return True
-                except adx_sandbox.SandboxError as error:
+                except adx_environment.EnvironmentError as error:
                     if (
                         getattr(error, "status_code", None) != 409
                         or getattr(error, "retry", None) == "never"
@@ -462,7 +462,7 @@ class _Session:
         except Exception as error:
             close_error = error
         try:
-            adx_sandbox.Sandbox.delete(self.id, connection=self._connection)
+            adx_environment.Environment.delete(self.id, connection=self._connection)
         except Exception as error:
             if close_error is not None:
                 logger.warning(
@@ -486,7 +486,7 @@ class _Session:
             self._closed = True
 
 
-class _OwnedSandbox(adx_sandbox.Sandbox):
+class _OwnedSandbox(adx_environment.Environment):
     """Native handle whose lifecycle is owned by the AKernel session."""
 
     def __del__(self) -> None:
@@ -496,7 +496,7 @@ class _OwnedSandbox(adx_sandbox.Sandbox):
 
 
 class AdxBackend:
-    """Backend implemented by ``adx-sandbox``."""
+    """Backend implemented by ``adx-environment``."""
 
     name = "adx"
     namespace = _NAMESPACE
@@ -508,18 +508,19 @@ class AdxBackend:
     )
 
     def __init__(self, config: BackendConfig) -> None:
-        self._connection = adx_sandbox.ConnectionConfig(
+        self._connection = adx_environment.ConnectionConfig(
             server_address=config.api_endpoint.authority(),
             token=config.token,
             use_tls=config.api_endpoint.use_tls,
             gateway_address=config.gateway_endpoint.authority(),
             gateway_use_tls=config.gateway_endpoint.use_tls,
+            verify_tls=config.verify_tls,
         )
 
     def pty_for(self, instance_id: str) -> Any:
         """Attach a PTY to an existing sandbox with the backend connection."""
 
-        return adx_sandbox.Pty(
+        return adx_environment.Pty(
             instance_id, connection=_control_pty_connection(self._connection)
         )
 
@@ -535,7 +536,7 @@ class AdxBackend:
         create_started = time.monotonic()
         rootfs = None
         if spec.rootfs is not None:
-            rootfs = adx_sandbox.S3Config(
+            rootfs = adx_environment.S3Config(
                 endpoint=spec.rootfs.endpoint,
                 bucket=spec.rootfs.bucket,
                 object=spec.rootfs.object,
@@ -546,11 +547,11 @@ class AdxBackend:
         if spec.network_policy is not None:
             network = _native_network_policy(spec.network_policy)
         mounts = [
-            adx_sandbox.Mount(
+            adx_environment.Mount(
                 target=mount.target,
                 image_url=mount.image_url,
                 s3_config=(
-                    adx_sandbox.S3Config(
+                    adx_environment.S3Config(
                         endpoint=mount.s3_config.endpoint,
                         bucket=mount.s3_config.bucket,
                         object=mount.s3_config.object,
@@ -603,7 +604,7 @@ class AdxBackend:
             create_timeout=create_timeout,
             failover=spec.failover,
             inherit_entrypoint=spec.inherit_entrypoint,
-            data_plane_security=adx_sandbox.DataPlaneSecurityPolicy(
+            data_plane_security=adx_environment.DataPlaneSecurityPolicy(
                 tunnel_mode="tls",
                 port_forward_mode="tls",
             ),
@@ -660,7 +661,7 @@ class AdxBackend:
     def delete_named(self, name: str) -> None:
         sandbox_id = f"{self.namespace}-{name}"
         try:
-            adx_sandbox.Sandbox.delete(
+            adx_environment.Environment.delete(
                 sandbox_id,
                 connection=self._connection,
             )
@@ -672,6 +673,6 @@ class AdxBackend:
 
 
 def create_backend(config: BackendConfig) -> Backend:
-    """Construct the ``adx-sandbox`` backend for the lazy registry."""
+    """Construct the ``adx-environment`` backend for the lazy registry."""
 
     return AdxBackend(config)

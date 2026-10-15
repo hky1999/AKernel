@@ -145,7 +145,7 @@ def create_sandbox(
         headers["Accept"] = "text/event-stream"
         headers["Content-Length"] = str(len(payload))
         connection.request(
-            "POST", "/api/sandbox/v1/sandboxes", body=payload, headers=headers
+            "POST", "/api/environment/v1/environments", body=payload, headers=headers
         )
         response = connection.getresponse()
         content = response.read()
@@ -160,7 +160,7 @@ def create_sandbox(
             result = json.loads(content)
         if not isinstance(result, dict) or result.get("status") != "running":
             raise RuntimeError(f"Sandbox create did not reach running: {result!r}")
-        if not (result.get("sandboxId") or result.get("instanceId")):
+        if not (result.get("environmentId")):
             raise RuntimeError("Sandbox create result has no Sandbox ID")
         return result
     finally:
@@ -174,7 +174,9 @@ def delete_sandbox(
     request_id = "delete-" + uuid.uuid4().hex
     connection = _connection(parsed, timeout_seconds)
     try:
-        path = "/api/sandbox/v1/sandboxes/" + urllib.parse.quote(sandbox_id, safe="")
+        path = "/api/environment/v1/environments/" + urllib.parse.quote(
+            sandbox_id, safe=""
+        )
         connection.request(
             "DELETE",
             path,
@@ -563,7 +565,7 @@ def main() -> None:
                     request_id=f"create-{run_id}-{index}",
                     timeout_seconds=120,
                 )
-                sandbox_id = str(result.get("sandboxId") or result.get("instanceId"))
+                sandbox_id = str(result.get("environmentId"))
                 reported_node = str(result.get("nodeId") or result.get("node_id") or "")
                 if reported_node and reported_node != args.target_node:
                     raise RuntimeError(

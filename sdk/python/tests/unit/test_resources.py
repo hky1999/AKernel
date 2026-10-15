@@ -71,7 +71,7 @@ class ResourcesTest(unittest.TestCase):
         request = urlopen.call_args.args[0]
         self.assertEqual(
             request.full_url,
-            "https://api.example/api/sandbox/v1/resources",
+            "https://api.example/api/environment/v1/resources",
         )
 
     def test_frontend_resource_values_are_backend_neutral(self):

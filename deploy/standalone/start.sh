@@ -605,8 +605,8 @@ wait_for_endpoints() {
 
     log_info "Waiting for ADX Edge and an allocatable node"
     for i in $(seq 1 ${retries}); do
-        if probe_adx_capacity "${control_url}/api/sandbox/v1/resources" &&
-           probe_adx_data_listener "${data_url}/api/sandbox/v1/resources"; then
+        if probe_adx_capacity "${control_url}/api/environment/v1/resources" &&
+           probe_adx_data_listener "${data_url}/api/environment/v1/resources"; then
             log_info "ADX control and data endpoints are ready"
             return 0
         fi

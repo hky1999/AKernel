@@ -114,7 +114,15 @@ class NetworkFeaturesIntegrationTest(unittest.TestCase):
                     "bash -c 'exec 3<>/dev/tcp/1.1.1.1/53'", timeout=8
                 )
             except BackendOperationError as error:
-                self.assertIn("timed out", str(error).lower())
+                cause = error.__cause__
+                processing_deadline = (
+                    getattr(cause, "status_code", None) == 504
+                    and getattr(cause, "code", None) == "PROCESSING_DEADLINE_EXCEEDED"
+                )
+                self.assertTrue(
+                    "timed out" in str(error).lower() or processing_deadline,
+                    str(error),
+                )
             else:
                 self.assertNotEqual(blocked.exit_code, 0)
             self.assertEqual(
