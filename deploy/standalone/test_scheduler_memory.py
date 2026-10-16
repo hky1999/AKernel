@@ -61,6 +61,7 @@ class MemoryConfigurationTest(unittest.TestCase):
                 self.assertEqual(prepared["host_budgets"]["BareMetal1"]["nodes"], ["memory-node"])
                 if enabled:
                     self.assertEqual(resource["memory_high_ratio"], 0.75)
+                    self.assertIs(resource["cgroup_io_accounting"], True)
                     policy = prepared["memory_control"]
                     self.assertEqual(policy["grow_per_mille"], 650)
                     self.assertEqual(policy["shrink_per_mille"], 300)
@@ -68,6 +69,7 @@ class MemoryConfigurationTest(unittest.TestCase):
                     self.assertEqual(policy["operation_timeout_millis"], 10000)
                 else:
                     self.assertNotIn("memory_high_ratio", resource)
+                    self.assertNotIn("cgroup_io_accounting", resource)
                     self.assertNotIn("memory_control", prepared)
                 validate.assert_called_once()
 
@@ -77,7 +79,8 @@ class MemoryConfigurationTest(unittest.TestCase):
                 "memory_control": {"grow_per_mille": 999}}}]}
             with self.subTest(enabled=enabled), self.assertRaises(RuntimeError):
                 entrypoint.configure_memory_control(expanded, "[plugin.resource]\n", enabled)
-        for text in ("[plugin.resource]\nmemory_high_ratio=0.9\n", "[other]\n"):
+        for text in ("[plugin.resource]\nmemory_high_ratio=0.9\n",
+                     "[plugin.resource]\ncgroup_io_accounting=false\n", "[other]\n"):
             expanded = {"services": [{"role": "coordinator", "config": {}}]}
             with self.subTest(text=text), self.assertRaises(RuntimeError):
                 entrypoint.configure_memory_control(expanded, text, True)

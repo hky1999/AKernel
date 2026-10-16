@@ -49,3 +49,9 @@ sandboxd `[plugin.resource]` 的 `memory_high_ratio=0.75`，冲突配置拒绝�
 启动失败退避、调度服务失败和关闭边界。修改源码不会改变已经运行的旧容器或双节点
 夹具。后者必须显式接入同一监督逻辑并重新冻结部署输入，随后独立验收原沙箱、资源
 代际、操作及预算的恢复，才能声称实际 sandboxd 故障门通过。
+
+## 恢复I/O统计的前置条件
+
+`--elastic-memory`同时在sandboxd资源配置开启 `cgroup_io_accounting=true`，并要求开发入口以 `prepare_cgroup(io_accounting=True)` 在移动任何服务进程前验证io可用，再向下委派。sandboxd继续检查挂载根至沙箱父分组的每一层，保证沙箱叶可提供io.stat。默认关闭模式不要求io，不修改io.max；显式开启但缺少委派时必须拒绝，不能把缺失统计当作零。双节点实验夹具须显式传入同一布尔配置并匹配新入口SHA256，不能因默认参数兼容而绕过前置检查。
+
+运行 `python3 -m unittest discover -s deploy/standalone -p test_scheduler_cgroup_io.py -v` 验证缺少io或namespace不符时尚未移动服务、正常委派和默认关闭行为。测试只写临时普通文件，不证明真实cgroup叶I/O计数、检查点／恢复峰值或原恢复卡点已经验收。

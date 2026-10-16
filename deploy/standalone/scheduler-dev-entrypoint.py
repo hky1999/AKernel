@@ -48,10 +48,12 @@ def configure_memory_control(expanded, sandboxd_text, enabled):
     if not enabled:
         return sandboxd_text
     marker = "[plugin.resource]\n"
-    if sandboxd_text.count(marker) != 1 or "memory_high_ratio" in sandboxd_text:
+    if sandboxd_text.count(marker) != 1 or any(
+            field in sandboxd_text for field in ("memory_high_ratio", "cgroup_io_accounting")):
         raise RuntimeError("守护进程模板的内存软节流配置与预期不一致")
     config["memory_control"] = policy
-    return sandboxd_text.replace(marker, marker + "memory_high_ratio=0.75\n")
+    return sandboxd_text.replace(
+        marker, marker + "memory_high_ratio=0.75\ncgroup_io_accounting=true\n")
 
 
 def fixed_capacity():
@@ -155,18 +157,25 @@ class FixedCapacityLease:
         self.previous = path.read_bytes()
 
 
-def prepare_cgroup():
+def prepare_cgroup(*, io_accounting=False):
+    if not isinstance(io_accounting, bool):
+        raise RuntimeError("I/O统计开关必须是明确的布尔值")
     # 此文件系统必须来自启动器声明的私有 cgroup namespace。
     if Path("/proc/self/ns/cgroup").readlink() != Path("/proc/1/ns/cgroup").readlink():
         raise RuntimeError("开发服务必须与容器 PID 1 共用私有 cgroup namespace")
     available = set((CGROUP / "cgroup.controllers").read_text().split())
-    if not {"cpu", "memory", "pids"}.issubset(available):
-        raise RuntimeError("开发容器缺少 cpu、memory 或 pids 控制器")
+    required = {"cpu", "memory", "pids"}
+    if io_accounting:
+        required.add("io")
+    if not required.issubset(available):
+        missing = ", ".join(sorted(required - available))
+        raise RuntimeError("开发容器缺少控制器：" + missing)
     services = CGROUP / "services"
     services.mkdir(exist_ok=True)
     for pid in (CGROUP / "cgroup.procs").read_text().split():
         (services / "cgroup.procs").write_text(pid)
-    (CGROUP / "cgroup.subtree_control").write_text("+cpu +memory +pids")
+    controls = "+cpu +memory +pids" + (" +io" if io_accounting else "")
+    (CGROUP / "cgroup.subtree_control").write_text(controls)
     (services / "memory.max").write_text(str(4 * 1024**3))
 
 
@@ -367,7 +376,7 @@ def run_services(daemon_argv, daemon_env, capacity_lease, stop_requested, *,
 
 def main():
     elastic_memory = elastic_memory_enabled()
-    prepare_cgroup()
+    prepare_cgroup(io_accounting=elastic_memory)
     prepare_config(elastic_memory=elastic_memory)
     capacity_lease = FixedCapacityLease()
     try:

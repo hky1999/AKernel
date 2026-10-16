@@ -700,3 +700,5 @@ alone.
 开发启动器的 `--elastic-memory` 默认关闭；启用后同步配置中心策略与 sandboxd 的
 全局 0.75 软节流比例。参见 `deploy/standalone/scheduler-dev.md`，源码和配置测试
 不代替实际物理资源曲线及预算验收。
+
+自动内存开发配置还显式开启sandboxd的 `cgroup_io_accounting`，入口须通过 `prepare_cgroup(io_accounting=elastic_memory)` 在移动服务前检查io控制器，随后委派给沙箱父分组。该开关默认关闭；开启后缺少io必须拒绝，不能静默回退或写io.max。修改此路径先运行容量专项，再运行 `python3 -m unittest discover -s deploy/standalone -p test_scheduler_cgroup_io.py -v` 及内存、监督和部署脚本检查。双节点夹具须匹配入口摘要并显式传入同一布尔值；这些源码检查不替代真实恢复I/O观测。

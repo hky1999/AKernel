@@ -70,7 +70,7 @@ def stop(*args):(root/'stop').touch()
 signal.signal(signal.SIGTERM,stop)
 if mode=='main':
  import os,threading
- entry.STATE=root;entry.prepare_cgroup=lambda:None;entry.prepare_config=lambda **kw:None;entry.FixedCapacityLease=Lease;entry.CAPACITY_REFRESH_SECONDS=.15
+ entry.STATE=root;entry.prepare_cgroup=lambda **kw:None;entry.prepare_config=lambda **kw:None;entry.FixedCapacityLease=Lease;entry.CAPACITY_REFRESH_SECONDS=.15
  original_path=entry.Path
  entry.Path=lambda value:root/'daemon.sock' if str(value)=='/run/sandboxd/sandboxd.sock' else original_path(value)
  original_spawn=entry.subprocess.Popen
