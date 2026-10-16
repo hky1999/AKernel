@@ -21,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: false
-      - name: Initialize pinned sandboxd fork
+      - name: Initialize pinned sandboxd
         run: |
           set -euo pipefail
           git submodule update --init src/sandboxd
