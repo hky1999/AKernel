@@ -437,7 +437,11 @@ class Sandbox:
 
     @classmethod
     def get_snapshot(cls, snapshot_id: str | SnapshotInfo) -> SnapshotInfo:
-        """Query an existing snapshot by its opaque ID."""
+        """Query catalog metadata by opaque ID, including retained tombstones.
+
+        A returned descriptor does not guarantee that new restores are allowed.
+        The backend checks snapshot readiness when restoring.
+        """
         return load_backend().get_snapshot(_snapshot_id(snapshot_id))
 
     @classmethod
@@ -468,9 +472,11 @@ class Sandbox:
     def delete_snapshot(cls, snapshot_id: str | SnapshotInfo) -> None:
         """Delete a reusable snapshot; an already absent snapshot is a no-op.
 
-        Existing sandboxes restored from it remain alive. Unlike E2B's boolean
-        return, this backend-neutral API returns None because the backend does
-        not distinguish a new deletion from an already absent snapshot.
+        Existing sandboxes restored from it remain alive. Deletion prevents
+        new restores; physical collection is asynchronous after references are
+        released, and catalog tombstones may remain queryable. Unlike E2B's
+        boolean return, this API returns None: the backend does not distinguish
+        new deletion from an already requested/absent snapshot.
         """
         load_backend().delete_snapshot(_snapshot_id(snapshot_id))
 

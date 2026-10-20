@@ -561,7 +561,7 @@ finally:
 | API | Result / semantics |
 | --- | --- |
 | `sandbox.create_snapshot(name=None, *, timeout=300)` | `SnapshotInfo(snapshot_id, names)`; captures runtime memory and filesystem, then the source continues. Timeout is 1..3600 seconds. |
-| `Sandbox.get_snapshot(snapshot_id)` | Query metadata by opaque ID. |
+| `Sandbox.get_snapshot(snapshot_id)` | Query catalog metadata by opaque ID; retained deletion tombstones may still be returned. |
 | `Sandbox.list_snapshots(name=None, limit=None, next_token=None)` | Lazy `SnapshotPaginator`; `limit` is the page size. Returns the accessible catalog, optionally filtered by name. |
 | `Sandbox.delete_snapshot(snapshot_id)` | Idempotent deletion, returns `None`; existing restored sandboxes remain alive. |
 | `Sandbox.from_snapshot(snapshot_id, ...)` | New `Sandbox`, new ID and fresh commands/files/PTY facades; does not delete or change the source. Accepts an ID or `SnapshotInfo`. |
@@ -595,8 +595,13 @@ For mounted external data, consistency and availability remain the caller's
 responsibility; restore does not copy node-local HostPath storage.
 
 Snapshots outlive their source and do not expire automatically. Delete them
-explicitly; storage locality and cross-node restore depend on cluster
-configuration. Capturing complete process state does not imply a full physical
+explicitly. Delete acknowledgement prevents new restore references; existing
+restores continue, and physical garbage collection waits for references to be
+released. Catalog records may remain queryable in Deleting/Deleted states, so a
+successful `get_snapshot()` is not a readiness or physical-deletion check. The
+current backend descriptor exposes only ID and names, not catalog state; the
+service validates readiness on `from_snapshot()`. Storage locality and cross-node
+restore depend on cluster configuration. Capturing complete process state does not imply a full physical
 copy: incremental/reflink storage is a runtime/deployment concern, not selected
 by this API. These APIs are separate from anonymous failover/reload checkpoints.
 
