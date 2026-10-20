@@ -35,6 +35,7 @@ from ..types import (
     NetworkRule,
     PortRange,
     SandboxInfo,
+    SnapshotInfo,
     TrafficPolicy,
 )
 from .base import (
@@ -43,6 +44,7 @@ from .base import (
     BackendSession,
     Capability,
     SandboxSpec,
+    SnapshotRestoreSpec,
 )
 from .errors import BackendOperationError, UnsupportedBackendFeatureError
 
@@ -192,10 +194,9 @@ def _route_read_retryable(error: Exception) -> bool:
     for _ in range(4):
         if cause is None:
             break
-        if (
-            isinstance(cause, adx_environment.EnvironmentError)
-            and getattr(cause, "status_code", None) in (409, 503)
-        ):
+        if isinstance(cause, adx_environment.EnvironmentError) and getattr(
+            cause, "status_code", None
+        ) in (409, 503):
             return getattr(cause, "retry", None) != "never"
         cause = cause.__cause__
     return False
@@ -295,9 +296,25 @@ class _CommandsDriver:
                 cwd=cwd,
                 stdin=stdin,
             )
+            # A successful submission may precede PID assignment. Resolve the
+            # stable command ID with reads, never submit the command twice.
+            pid = handle.pid
+            deadline = time.monotonic() + 10
+            while pid is None:
+                values = self._commands.list()
+                row = next((v for v in values if v.id == handle.id), None)
+                pid = row.pid if row is not None else None
+                if pid is None:
+                    if time.monotonic() >= deadline:
+                        raise BackendOperationError(
+                            "submitted command has no PID; it was not resubmitted",
+                            outcome="unknown",
+                            operation_id=str(handle.id),
+                        )
+                    time.sleep(0.1)
+            pid = int(pid)
         except Exception as error:
             raise _convert_error("background command start", error) from error
-        pid = int(handle.pid)
         self._handles[pid] = handle
         return pid
 
@@ -324,7 +341,11 @@ class _CommandsDriver:
 
     def list(self) -> list[CommandInfo]:
         try:
-            return [_command_info(value) for value in self._commands.list()]
+            return [
+                _command_info(value)
+                for value in self._commands.list()
+                if value.pid is not None
+            ]
         except Exception as error:
             raise _convert_error("list processes", error) from error
 
@@ -404,7 +425,7 @@ class _Session:
     def __init__(
         self,
         sandbox: Any,
-        spec: SandboxSpec,
+        spec: SandboxSpec | SnapshotRestoreSpec,
         connection: Any,
     ) -> None:
         self.id = str(sandbox.id)
@@ -440,6 +461,13 @@ class _Session:
             xpu=self._spec.xpu,
             storage_mb=self._spec.storage_mb,
         )
+
+    def create_snapshot(self, name: str | None, timeout: int) -> SnapshotInfo:
+        try:
+            value = self._sandbox.create_snapshot(name=name, timeout_seconds=timeout)
+            return SnapshotInfo(str(value.snapshot_id), tuple(value.names))
+        except Exception as error:
+            raise _convert_error("create snapshot", error) from error
 
     def reload(self) -> bool:
         if self._terminated or self._closed:
@@ -708,6 +736,101 @@ class AdxBackend:
                     f"initialize sandbox cwd {spec.command_cwd!r}", error
                 ) from error
         return session
+
+    def from_snapshot(self, spec: SnapshotRestoreSpec) -> BackendSession:
+        tunnel = spec.reverse_tunnel
+        if tunnel is not None and tunnel.reverse_port != tunnel.listen_port - 1:
+            raise UnsupportedBackendFeatureError(
+                "Backend 'adx' requires reverse_port to equal listen_port - 1."
+            )
+        started = time.monotonic()
+        try:
+            sandbox = _OwnedSandbox.create(
+                spec.snapshot_id,
+                idle_timeout=spec.idle_timeout,
+                schedule_timeout=spec.schedule_timeout,
+                create_timeout=spec.timeout,
+                name=spec.name,
+                cwd=spec.command_cwd,
+                port_forwardings=list(spec.port_forwardings),
+                mounts=[_native_mount(mount) for mount in spec.mounts],
+                upstream=tunnel.target if tunnel else None,
+                proxy_port=tunnel.listen_port if tunnel else _DEFAULT_LISTEN_PORT,
+                tunnel_connect_timeout=tunnel.connect_timeout if tunnel else None,
+                detached=spec.detached,
+                failover=spec.failover,
+                node_id=spec.node_id,
+                network=(
+                    _native_network_policy(spec.network_policy)
+                    if spec.network_policy is not None
+                    else None
+                ),
+                data_plane_security=adx_environment.DataPlaneSecurityPolicy(
+                    tunnel_mode="tls",
+                    port_forward_mode="tls",
+                ),
+                connection=self._connection,
+            )
+        except Exception as error:
+            raise _convert_error("restore snapshot", error) from error
+        session = _Session(sandbox, spec, self._connection)
+        try:
+            deadline = min(started + spec.timeout, time.monotonic() + 10)
+            while True:
+                try:
+                    session.commands.list()
+                    break
+                except BackendOperationError as error:
+                    if not _route_read_retryable(error) or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+        except Exception:
+            try:
+                session.terminate()
+            except Exception:
+                logger.warning("failed to clean up restored sandbox", exc_info=True)
+            raise
+        return session
+
+    def get_snapshot(self, snapshot_id: str) -> SnapshotInfo:
+        try:
+            value = adx_environment.Environment.get_snapshot(
+                snapshot_id,
+                connection=self._connection,
+            )
+            return SnapshotInfo(str(value.snapshot_id), tuple(value.names))
+        except Exception as error:
+            raise _convert_error("get snapshot", error) from error
+
+    def list_snapshots(
+        self,
+        name: str | None,
+        next_token: str | None,
+        limit: int | None,
+    ) -> tuple[list[SnapshotInfo], str | None]:
+        try:
+            values, token = adx_environment.Environment.list_snapshots(
+                name=name,
+                page_token=next_token,
+                page_size=limit,
+                connection=self._connection,
+            )
+            return [
+                SnapshotInfo(str(v.snapshot_id), tuple(v.names)) for v in values
+            ], token or None
+        except Exception as error:
+            raise _convert_error("list snapshots", error) from error
+
+    def delete_snapshot(self, snapshot_id: str) -> None:
+        try:
+            adx_environment.Environment.delete_snapshot(
+                snapshot_id,
+                connection=self._connection,
+            )
+        except Exception as error:
+            if getattr(error, "status_code", None) == 404:
+                return
+            raise _convert_error("delete snapshot", error) from error
 
     def delete_named(self, name: str) -> None:
         sandbox_id = f"{self.namespace}-{name}"

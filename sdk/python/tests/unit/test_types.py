@@ -86,6 +86,8 @@ assert get_type_hints(apply_dockerfile)['sb'] is Sandbox
                 "CommandHandle",
                 "EntryInfo",
                 "SandboxInfo",
+                "SnapshotInfo",
+                "SnapshotPaginator",
                 "NodeInfo",
                 "Pty",
                 "PtySession",

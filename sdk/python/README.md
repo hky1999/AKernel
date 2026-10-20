@@ -17,6 +17,7 @@ PTYs, port forwarding, and reverse tunnels.
   - [Filesystem](#filesystem)
   - [Interactive PTYs](#interactive-ptys)
   - [Port forwarding](#port-forwarding)
+  - [Reusable snapshots](#reusable-snapshots)
   - [Local failover and reload](#local-failover-and-reload)
   - [Reverse tunnels](#reverse-tunnels)
   - [Rootfs and mounts](#rootfs-and-mounts)
@@ -532,6 +533,90 @@ with Sandbox(port_forwardings=[8080]) as sandbox:
 deployment operator explicitly wants the direct ADX Ingress address instead of the
 public gateway.
 
+## Reusable snapshots
+
+This API is available in this source revision; previously published `0.2.0rc2`
+and earlier wheels do not contain it. Install this revision from source until a
+release includes it. The cluster/runtime must support reusable memory/filesystem
+snapshots. Unsupported operations fail with the backend's structured error.
+
+```python
+from akernel_sdk import Sandbox
+
+snapshot = None
+try:
+    with Sandbox(image="python:3.12-slim") as source:
+        source.files.write("/tmp/progress", "turn 10")
+        snapshot = source.create_snapshot(name="turn-10", timeout=300)
+        print(Sandbox.get_snapshot(snapshot.snapshot_id))
+        # Source resumes after capture; it can also be deleted independently.
+
+    with Sandbox.from_snapshot(snapshot.snapshot_id) as restored:
+        assert restored.files.read("/tmp/progress") == "turn 10"
+finally:
+    if snapshot is not None:
+        Sandbox.delete_snapshot(snapshot.snapshot_id)
+```
+
+| API | Result / semantics |
+| --- | --- |
+| `sandbox.create_snapshot(name=None, *, timeout=300)` | `SnapshotInfo(snapshot_id, names)`; captures runtime memory and filesystem, then the source continues. Timeout is 1..3600 seconds. |
+| `Sandbox.get_snapshot(snapshot_id)` | Query metadata by opaque ID. |
+| `Sandbox.list_snapshots(name=None, limit=None, next_token=None)` | Lazy `SnapshotPaginator`; `limit` is the page size. Returns the accessible catalog, optionally filtered by name. |
+| `Sandbox.delete_snapshot(snapshot_id)` | Idempotent deletion, returns `None`; existing restored sandboxes remain alive. |
+| `Sandbox.from_snapshot(snapshot_id, ...)` | New `Sandbox`, new ID and fresh commands/files/PTY facades; does not delete or change the source. Accepts an ID or `SnapshotInfo`. |
+
+The naming and paginator pattern follow E2B. Deliberate differences: use explicit
+`from_snapshot` instead of overloading an image/template argument; listing is a
+class-level catalog operation, including when accessed through an instance;
+delete returns `None` because the backend does not distinguish absent from
+newly deleted snapshots. Only memory/filesystem capture is exposed; no
+unsupported filesystem-only mode or fabricated timestamps/storage metrics.
+
+```python
+pages = Sandbox.list_snapshots(name="turn-10", limit=20)
+while pages.has_next:
+    for snapshot in pages.next_items():
+        print(snapshot.snapshot_id, snapshot.names)
+# Save pages.next_token between pages to resume a listing later.
+```
+
+Restore inherits captured runtime and CPU/memory geometry rather than applying
+constructor defaults. It does not replay a Dockerfile, image ENTRYPOINT, CMD or
+working-directory creation. `cwd` only sets the command default. `idle_timeout`
+(default 300), `schedule_timeout` (30), `timeout` (schedule timeout + 60), `name`,
+`detached`, `failover`, `node_id`, `port_forwardings`, `mounts`, `reverse_tunnel`
+and `network_policy` configure the new environment/client. Rebind the local
+`HttpReverseTunnel` target explicitly; source client sockets/PTYs/Python handles
+are not restored. An omitted network policy inherits the captured policy;
+call `restored.update_network_policy(None)` to explicitly clear it. A supplied
+policy is applied during creation. Empty policy also inherits during creation.
+For mounted external data, consistency and availability remain the caller's
+responsibility; restore does not copy node-local HostPath storage.
+
+Snapshots outlive their source and do not expire automatically. Delete them
+explicitly; storage locality and cross-node restore depend on cluster
+configuration. Capturing complete process state does not imply a full physical
+copy: incremental/reflink storage is a runtime/deployment concern, not selected
+by this API. These APIs are separate from anonymous failover/reload checkpoints.
+
+A remote snapshot does not save the host harness conversation or cursor, model
+requests, or external service state. Quiesce tools and model streams and pair
+local harness state with the returned ID. A restore can execute concurrently
+with its source; the harness must fence the old instance before allowing a
+recovered agent to proceed. It must not also relaunch an agent whose process
+memory has been restored.
+
+`BackendOperationError` preserves status, code, retry/outcome, request ID and
+operation ID when supplied. Snapshot creation makes one request attempt. Restore
+uses the native transport's same-operation retries (stable request ID); the
+public SDK does not initiate a second logical restore. On unknown outcome,
+reconcile using the supplied IDs instead of blindly calling create/restore
+again. Read-only route readiness checks retry temporary 409/503 responses for
+up to 10 seconds within the restore timeout, without recreating the sandbox.
+Initialization failures attempt to delete the known-created clone and preserve
+the original error. See [`examples/snapshots.py`](./examples/snapshots.py).
+
 ## Local failover and reload
 
 `Sandbox(failover=True)` opts into same-node recovery of the same logical
@@ -550,8 +635,9 @@ created by sandbox workloads through Execd's internal `POST /checkpoint`
 endpoint on `/run/akernel/execd.sock`. A successful request returns
 `{"status":"completed"}`; a concurrent checkpoint request returns HTTP 409.
 This Unix-socket protocol is experimental and is not a stable public AKernel
-SDK interface. The SDK deliberately does not expose checkpoint identifiers,
-restore, list, or delete operations.
+SDK interface. These anonymous checkpoints have no public catalog; use the
+separate reusable snapshot APIs above when you need an independent snapshot ID
+and restoration to a new sandbox.
 
 The bundled runsc and Firecracker runtimes support this recovery flow. The
 maintained example validates it with runsc and installs curl in the sandbox
@@ -863,6 +949,7 @@ Maintained examples are under [`examples/`](./examples):
 - `command_stdin.py`
 - `custom_image.py`
 - `dockerfile_launch.py`
+- `snapshots.py`
 - `failover_reload.py`
 - `gpu_sandbox.py`
 - `hostpath_mounts.py`

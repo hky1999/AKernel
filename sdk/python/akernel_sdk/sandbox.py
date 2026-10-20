@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 
 from ._addresses import gateway_endpoint_from_env
-from ._backends.base import BackendSession, SandboxSpec
+from ._backends.base import BackendSession, SandboxSpec, SnapshotRestoreSpec
 from ._backends.registry import load_backend
 from ._dockerfile_launch import DockerfileLaunch
 from ._sandbox_resources import (
@@ -30,6 +30,8 @@ from ._sandbox_resources import (
     validate_storage_limit_mb,
     validate_storage_mb,
 )
+from ._snapshots import SnapshotPaginator, optional_name
+from ._snapshots import snapshot_id as _snapshot_id
 from .commands import CommandHandle, Commands
 from .filesystem import Filesystem
 from .pty import Pty
@@ -39,6 +41,7 @@ from .types import (
     NetworkPolicy,
     S3Config,
     SandboxInfo,
+    SnapshotInfo,
 )
 
 logger = logging.getLogger(__name__)
@@ -337,11 +340,12 @@ class Sandbox:
         self._pty: Pty | None = None
         self._closed = False
         self._terminated = detached
+        self._detached = detached
         self._reverse_tunnel = reverse_tunnel
         self._forwarded_ports = set(ports)
         self._image = image
-        self._cpu = cpu
-        self._memory = memory
+        self._cpu: int | None = cpu
+        self._memory: int | None = memory
         self._xpu = normalized_xpu
         self._storage_mb = storage_mb
         self._inherit_entrypoint = inherit_entrypoint
@@ -411,6 +415,170 @@ class Sandbox:
                     exc_info=True,
                 )
             raise
+
+    def create_snapshot(
+        self, name: str | None = None, *, timeout: int = 300
+    ) -> SnapshotInfo:
+        """Save a reusable memory/filesystem snapshot and keep this sandbox running.
+
+        Runtime support is required. External services, client-side Python state
+        and open client transports are not captured. The snapshot outlives its
+        source; explicitly delete it when no longer needed. An ambiguous failure
+        is propagated with request/outcome context, never automatically retried.
+        ``timeout`` is in seconds (1..3600).
+        """
+        name = optional_name(name)
+        _validate_integer("timeout", timeout, minimum=1)
+        if timeout > 3600:
+            raise ValueError("timeout must be between 1 and 3600")
+        if self._closed or self._session is None:
+            raise RuntimeError("cannot snapshot a closed sandbox")
+        return self._session.create_snapshot(name, timeout)
+
+    @classmethod
+    def get_snapshot(cls, snapshot_id: str | SnapshotInfo) -> SnapshotInfo:
+        """Query an existing snapshot by its opaque ID."""
+        return load_backend().get_snapshot(_snapshot_id(snapshot_id))
+
+    @classmethod
+    def list_snapshots(
+        cls,
+        *,
+        name: str | None = None,
+        limit: int | None = None,
+        next_token: str | None = None,
+    ) -> SnapshotPaginator:
+        """List the accessible catalog, optionally filtered by name.
+
+        Like E2B, ``limit`` is the page size and pages are requested using
+        ``next_items()``. Unlike E2B's instance listing, this class method does
+        not filter by source sandbox, even when accessed through an instance.
+        """
+        name = optional_name(name)
+        if limit is not None:
+            _validate_integer("limit", limit, minimum=1)
+        if next_token is not None and not isinstance(next_token, str):
+            raise TypeError("next_token must be a string or None")
+        backend = load_backend()
+        return SnapshotPaginator(
+            lambda token: backend.list_snapshots(name, token, limit), next_token
+        )
+
+    @classmethod
+    def delete_snapshot(cls, snapshot_id: str | SnapshotInfo) -> None:
+        """Delete a reusable snapshot; an already absent snapshot is a no-op.
+
+        Existing sandboxes restored from it remain alive. Unlike E2B's boolean
+        return, this backend-neutral API returns None because the backend does
+        not distinguish a new deletion from an already absent snapshot.
+        """
+        load_backend().delete_snapshot(_snapshot_id(snapshot_id))
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot_id: str | SnapshotInfo,
+        *,
+        idle_timeout: int = 300,
+        schedule_timeout: int = 30,
+        timeout: int | None = None,
+        name: str | None = None,
+        cwd: str | None = None,
+        port_forwardings: Sequence[int] | None = None,
+        mounts: Sequence[Mount] | None = None,
+        reverse_tunnel: HttpReverseTunnel | None = None,
+        detached: bool = False,
+        failover: bool = False,
+        node_id: str | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> Sandbox:
+        """Restore a ready snapshot into a new sandbox with a new ID.
+
+        Inherits captured runtime, resource geometry and process state; does not
+        rerun Dockerfile setup or the image entrypoint. The source is unaffected.
+        Rebind client-side tunnels, ports and mounts explicitly as needed.
+        ``cwd`` sets a command default without creating directories. Omitted
+        network policy inherits the snapshot policy; use
+        ``update_network_policy(None)`` to explicitly clear it after restore.
+        ``timeout`` bounds creation (default schedule_timeout + 60 seconds).
+        The SDK never starts a second logical restore to hide a failed one;
+        the transport may retry the same operation using a stable request ID.
+        Client handles from the source must not be reused against the new sandbox.
+        """
+        identity = _snapshot_id(snapshot_id)
+        name = optional_name(name)
+        _validate_integer("idle_timeout", idle_timeout, minimum=0)
+        _validate_integer("schedule_timeout", schedule_timeout, minimum=1)
+        if timeout is None:
+            timeout = schedule_timeout + 60
+        _validate_integer("timeout", timeout, minimum=1)
+        for key, value in (("detached", detached), ("failover", failover)):
+            if not isinstance(value, bool):
+                raise TypeError(f"{key} must be a boolean")
+        if cwd is not None and (not isinstance(cwd, str) or not cwd.startswith("/")):
+            raise ValueError("cwd must be an absolute POSIX path")
+        if node_id is not None and (
+            not isinstance(node_id, str) or not node_id.strip()
+        ):
+            raise ValueError("node_id must be a non-empty string")
+        if network_policy is not None and not isinstance(network_policy, NetworkPolicy):
+            raise TypeError("network_policy must be a NetworkPolicy or None")
+        if reverse_tunnel is not None and not isinstance(
+            reverse_tunnel, HttpReverseTunnel
+        ):
+            raise TypeError("reverse_tunnel must be an HttpReverseTunnel")
+        ports = _normalize_ports(port_forwardings)
+        mount_list = _normalize_mounts(mounts)
+        if reverse_tunnel is not None and set(ports).intersection(
+            {reverse_tunnel.listen_port, reverse_tunnel.reverse_port}
+        ):
+            raise ValueError("reverse tunnel ports conflict with port_forwardings")
+        spec = SnapshotRestoreSpec(
+            snapshot_id=identity,
+            idle_timeout=idle_timeout,
+            schedule_timeout=schedule_timeout,
+            timeout=timeout,
+            name=name,
+            command_cwd=cwd,
+            port_forwardings=tuple(ports),
+            mounts=tuple(mount_list),
+            reverse_tunnel=reverse_tunnel,
+            detached=detached,
+            failover=failover,
+            node_id=node_id,
+            network_policy=network_policy,
+        )
+        # Bypass fresh creation: invoking __init__ would boot a second sandbox
+        # and could repeat Dockerfile/entrypoint side effects.
+        result = cls.__new__(cls)
+        result._session = load_backend().from_snapshot(spec)
+        result._startup_command = None
+        result._pty = None
+        result._closed = False
+        result._terminated = detached
+        result._detached = detached
+        result._reverse_tunnel = reverse_tunnel
+        result._forwarded_ports = set(ports)
+        result._inherit_entrypoint = False
+        result._id = result._session.id
+        try:
+            info = result._session.get_info()
+            result._image, result._cpu, result._memory = (
+                info.image,
+                info.cpu,
+                info.memory,
+            )
+            result._xpu, result._storage_mb = info.xpu, info.storage_mb
+            result._files = Filesystem(result._session.files)
+            result._commands = Commands(result._session.commands)
+            result._pty = Pty(result._id, driver=result._session.pty)
+        except Exception:
+            try:
+                result._session.terminate()
+            except Exception:
+                logger.warning("failed to clean up restored sandbox", exc_info=True)
+            raise
+        return result
 
     @property
     def files(self) -> Filesystem:
@@ -553,9 +721,16 @@ class Sandbox:
         return self._session.is_running()
 
     def get_info(self) -> SandboxInfo:
-        """Return current sandbox state and requested resources."""
+        """Return sandbox state and resources.
 
-        if self._session is None:
+        After confirmed termination of an owned sandbox, return local stopped
+        state without using a closed transport. Failed deletion and detached
+        client closure do not establish remote termination.
+        """
+
+        if self._session is None or (
+            self._closed and self._terminated and not self._detached
+        ):
             return SandboxInfo(
                 id=self.id,
                 state="stopped",

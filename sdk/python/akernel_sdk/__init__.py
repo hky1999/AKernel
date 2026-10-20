@@ -23,6 +23,7 @@ from ._backends.errors import (
     UnsupportedBackendFeatureError,
 )
 from ._backends.registry import selected_backend
+from ._snapshots import SnapshotPaginator
 from .types import (
     CommandInfo,
     CommandResult,
@@ -37,6 +38,7 @@ from .types import (
     PortRange,
     S3Config,
     SandboxInfo,
+    SnapshotInfo,
     TrafficPolicy,
 )
 
@@ -56,6 +58,8 @@ __all__ = [
     "CommandHandle",
     "EntryInfo",
     "SandboxInfo",
+    "SnapshotInfo",
+    "SnapshotPaginator",
     "NodeInfo",
     "Pty",
     "PtySession",
