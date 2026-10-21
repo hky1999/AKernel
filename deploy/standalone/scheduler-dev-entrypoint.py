@@ -31,6 +31,20 @@ def elastic_memory_enabled():
     return value == "true"
 
 
+def history_reclamation_enabled():
+    value = os.environ.get("AKERNEL_SCHEDULER_HISTORY_RECLAMATION", "false")
+    if value not in ("true", "false"):
+        raise RuntimeError("AKERNEL_SCHEDULER_HISTORY_RECLAMATION 只能是 true 或 false")
+    return value == "true"
+
+
+def configure_history_reclamation(expanded, enabled):
+    nodes = [service for service in expanded["services"] if service["role"] == "adxlet"]
+    if len(nodes) != 1 or not isinstance(enabled, bool):
+        raise RuntimeError("历史回收要求单个明确节点和布尔开关")
+    nodes[0]["config"]["history_reclamation"] = enabled
+
+
 def configure_memory_control(expanded, sandboxd_text, enabled):
     """为单节点实验同时配置中心策略和守护进程的软节流比例。"""
     coordinators = [service for service in expanded["services"]
@@ -181,7 +195,8 @@ def prepare_cgroup(*, io_accounting=False):
 
 def prepare_config(templates=Path("/etc/akernel/dev-templates"),
                    output=Path("/etc/akernel/adx-standalone.yaml"),
-                   adxctl="/opt/adx/current/bin/adxctl", *, elastic_memory=False):
+                   adxctl="/opt/adx/current/bin/adxctl", *, elastic_memory=False,
+                   history_reclamation=False):
     config = STATE / "sandboxd/config"
     config.mkdir(parents=True, exist_ok=True)
     for name in ("config.json", "oss.json", "registry.json", "oss_auths.json"):
@@ -248,6 +263,7 @@ def prepare_config(templates=Path("/etc/akernel/dev-templates"),
     expanded = yaml.safe_load(subprocess.check_output(
         [adxctl, "--config", str(output), "config", "dump"], text=True))
     configure_host_budget(expanded)
+    configure_history_reclamation(expanded, history_reclamation)
     text = configure_memory_control(expanded, text, elastic_memory)
     (STATE / "sandboxd/config.toml").write_text(text)
     for service in expanded["services"]:
@@ -376,8 +392,9 @@ def run_services(daemon_argv, daemon_env, capacity_lease, stop_requested, *,
 
 def main():
     elastic_memory = elastic_memory_enabled()
+    history_reclamation = history_reclamation_enabled()
     prepare_cgroup(io_accounting=elastic_memory)
-    prepare_config(elastic_memory=elastic_memory)
+    prepare_config(elastic_memory=elastic_memory, history_reclamation=history_reclamation)
     capacity_lease = FixedCapacityLease()
     try:
         subprocess.run(["/usr/local/bin/sandboxd-network-prepare"], check=True)

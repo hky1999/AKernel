@@ -702,3 +702,5 @@ alone.
 不代替实际物理资源曲线及预算验收。
 
 自动内存开发配置还显式开启sandboxd的 `cgroup_io_accounting`，入口须通过 `prepare_cgroup(io_accounting=elastic_memory)` 在移动服务前检查io控制器，随后委派给沙箱父分组。该开关默认关闭；开启后缺少io必须拒绝，不能静默回退或写io.max。修改此路径先运行容量专项，再运行 `python3 -m unittest discover -s deploy/standalone -p test_scheduler_cgroup_io.py -v` 及内存、监督和部署脚本检查。双节点夹具须匹配入口摘要并显式传入同一布尔值；这些源码检查不替代真实恢复I/O观测。
+
+预算历史开发的独立开关为 `--history-reclamation`，对应 `AKERNEL_SCHEDULER_HISTORY_RECLAMATION` 和节点 `history_reclamation`。默认关闭，匹配组件启用后保留持久拒绝边界，不能靠停用开关或降级旧程序清空它。修改配置路径时运行 `test_scheduler_history.py`，并保留容量、内存、io及监督配置的既有检查。

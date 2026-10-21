@@ -13,8 +13,10 @@ OWNER = "akernel.scheduler.environment=agent-dx-dev-20261010"
 STATE = Path("/data/akernel-agent-dx-dev/state")
 
 
-def commands(image, *, elastic_memory=False):
+def commands(image, *, elastic_memory=False, history_reclamation=False):
     environment = ["--env", "AKERNEL_SCHEDULER_ELASTIC_MEMORY=true"] if elastic_memory else []
+    if history_reclamation:
+        environment += ["--env", "AKERNEL_SCHEDULER_HISTORY_RECLAMATION=true"]
     return [
         ["docker", "network", "create", "--label", OWNER, NETWORK],
         ["docker", "run", "--detach", "--name", NAME, "--label", OWNER,
@@ -33,6 +35,8 @@ def main():
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--elastic-memory", action="store_true",
                         help="启用匹配候选的自动内存策略和 75%% 的软节流比例")
+    parser.add_argument("--history-reclamation", action="store_true",
+                        help="启用匹配组件的持久历史回收边界")
     args = parser.parse_args()
     # 镜像必须使用完整本地内容身份，不通过可变标签启动。
     if not args.image.startswith("sha256:") or len(args.image) != 71:
@@ -41,7 +45,8 @@ def main():
         int(args.image[7:], 16)
     except ValueError:
         parser.error("镜像 SHA256 非法")
-    plan = commands(args.image, elastic_memory=args.elastic_memory)
+    plan = commands(args.image, elastic_memory=args.elastic_memory,
+                    history_reclamation=args.history_reclamation)
     print(json.dumps({"state": str(STATE), "commands": plan}, indent=2), flush=True)
     if not args.apply:
         return

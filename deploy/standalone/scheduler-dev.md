@@ -55,3 +55,14 @@ sandboxd `[plugin.resource]` 的 `memory_high_ratio=0.75`，冲突配置拒绝�
 `--elastic-memory`同时在sandboxd资源配置开启 `cgroup_io_accounting=true`，并要求开发入口以 `prepare_cgroup(io_accounting=True)` 在移动任何服务进程前验证io可用，再向下委派。sandboxd继续检查挂载根至沙箱父分组的每一层，保证沙箱叶可提供io.stat。默认关闭模式不要求io，不修改io.max；显式开启但缺少委派时必须拒绝，不能把缺失统计当作零。双节点实验夹具须显式传入同一布尔配置并匹配新入口SHA256，不能因默认参数兼容而绕过前置检查。
 
 运行 `python3 -m unittest discover -s deploy/standalone -p test_scheduler_cgroup_io.py -v` 验证缺少io或namespace不符时尚未移动服务、正常委派和默认关闭行为。测试只写临时普通文件，不证明真实cgroup叶I/O计数、检查点／恢复峰值或原恢复卡点已经验收。
+
+
+## 预算及执行历史的回收开关
+
+`--history-reclamation` 显式加入 `AKERNEL_SCHEDULER_HISTORY_RECLAMATION=true`，入口把展开后的节点配置设为 `history_reclamation: true`。此开关默认关闭，与自动内存策略独立；环境值只接受 `true` 或 `false`。匹配的Coordinator、adxlet和sandboxd分别提供一致权威边界、持久确认意图和可续做的回收事务。新候选仍须在调度器版本台账登记源码、构建和物理验收，不能从配置测试推导已部署。
+
+节点每30秒最多选择32个已经结算的终态。守护进程的清单容量不足时，节点把同一持久批次拆小重试；全部历史确认到达前保留原事实。当前执行、结果未知、当前确认内存与未决预留受到保护。中心完成操作保留64条并保存关闭下界和冷却时间信息，节点审计为每Runtime保留8条。退役回执和进度只有在原物理退役及中心预算释放分别成立后才回收，回收接口本身不释放预算。
+
+启用后SQLite版本3、中心存储版本8和daemon创建准入索引版本2会拒绝旧二进制。停用周期回收不会擦除既有拒绝边界。重启必须保留原数据库、锁、权威边界和事务清单；不能删除这些文件来恢复准入。完整历史身份的恢复只使用同Runtime、相同创建与删除意图、相同退役generation的已完成原事实。缺失或损坏存储仍须保持拒绝，不把记录缺席当成物理退役。
+
+配置检查使用 `python3 -m unittest discover -s deploy/standalone -p test_scheduler_history.py -v`。双节点验收夹具必须显式接入同一布尔开关及匹配入口摘要，不能把单节点启动器用作替换既有双节点环境的命令。
