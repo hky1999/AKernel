@@ -41,6 +41,10 @@ from .types import (
 )
 
 __all__ = [
+    "SharedVolumeMount",
+    "SharedVolumes",
+    "SharedVolumeInfo",
+    "SharedVolumeGrant",
     "Sandbox",
     "S3Config",
     "Mount",
@@ -82,6 +86,10 @@ __all__ = [
 ]
 
 _LAZY_IMPORTS = {
+    "SharedVolumeMount": ("._shared_volume_mounts", "SharedVolumeMount"),
+    "SharedVolumes": (".shared_volumes", "SharedVolumes"),
+    "SharedVolumeInfo": (".shared_volumes", "SharedVolumeInfo"),
+    "SharedVolumeGrant": (".shared_volumes", "SharedVolumeGrant"),
     "Sandbox": (".sandbox", "Sandbox"),
     "CommandHandle": (".commands", "CommandHandle"),
     "Pty": (".pty", "Pty"),

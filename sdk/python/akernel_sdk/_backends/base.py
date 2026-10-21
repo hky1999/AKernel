@@ -22,6 +22,7 @@ from enum import Enum, auto
 from typing import Any, Protocol
 
 from .._addresses import Endpoint
+from .._shared_volume_mounts import SharedVolumeMount
 from ..types import (
     CommandInfo,
     CommandResult,
@@ -41,6 +42,7 @@ class Capability(Enum):
     NODE_PLACEMENT = auto()
     CUSTOM_REVERSE_TUNNEL_PORTS = auto()
     REVERSE_WEBSOCKET = auto()
+    SHARED_VOLUMES = auto()
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,7 @@ class SandboxSpec:
     storage_limit_mb: int
     network_policy: NetworkPolicy | None
     extra_config: Mapping[str, object]
+    shared_volumes: tuple[SharedVolumeMount, ...] = ()
 
 
 class CommandsDriver(Protocol):
@@ -194,6 +197,8 @@ class Backend(Protocol):
     def create(self, spec: SandboxSpec) -> BackendSession: ...
 
     def pty_for(self, instance_id: str) -> PtyDriver: ...
+
+    def shared_volumes(self) -> Any: ...
 
     def delete_named(self, name: str) -> None: ...
 

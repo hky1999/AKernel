@@ -62,6 +62,35 @@ def _spec(**overrides):
 
 
 class AdxBackendTest(unittest.TestCase):
+    def test_shared_volume_mounts_reach_the_native_sdk_without_host_paths(self):
+        from akernel_sdk import SharedVolumeMount
+
+        native = MagicMock()
+        native.id = "shared-native"
+        mount = SharedVolumeMount(
+            "00000000-0000-4000-8000-000000000001", "/shared", access="read_write"
+        )
+        with patch.object(adx, "_OwnedSandbox", return_value=native) as create:
+            session = adx.AdxBackend(self.config).create(_spec(shared_volumes=(mount,)))
+            try:
+                self.assertEqual(
+                    create.call_args.kwargs["shared_volumes"][0].to_dict(),
+                    mount.to_dict(),
+                )
+            finally:
+                session.close()
+
+    def test_old_native_sdk_is_rejected_before_remote_creation(self):
+        from akernel_sdk import SharedVolumeMount
+        from akernel_sdk._backends.errors import UnsupportedBackendFeatureError
+
+        mount = SharedVolumeMount("00000000-0000-4000-8000-000000000001", "/shared")
+        with patch.object(adx.adx_environment, "SDK_CAPABILITIES", frozenset()):
+            with patch.object(adx, "_OwnedSandbox") as create:
+                with self.assertRaises(UnsupportedBackendFeatureError):
+                    adx.AdxBackend(self.config).create(_spec(shared_volumes=(mount,)))
+                create.assert_not_called()
+
     def setUp(self):
         self.config = BackendConfig(
             api_endpoint=Endpoint("api.example", 443, "https", True),

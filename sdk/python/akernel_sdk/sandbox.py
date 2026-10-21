@@ -22,7 +22,8 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 
 from ._addresses import gateway_endpoint_from_env
-from ._backends.base import BackendSession, SandboxSpec
+from ._backends.base import BackendSession, Capability, SandboxSpec
+from ._backends.errors import UnsupportedBackendFeatureError
 from ._backends.registry import load_backend
 from ._dockerfile_launch import DockerfileLaunch
 from ._sandbox_resources import (
@@ -30,6 +31,7 @@ from ._sandbox_resources import (
     validate_storage_limit_mb,
     validate_storage_mb,
 )
+from ._shared_volume_mounts import SharedVolumeMount, normalize_shared_mounts
 from .commands import CommandHandle, Commands
 from .filesystem import Filesystem
 from .pty import Pty
@@ -176,6 +178,7 @@ class Sandbox:
         network_policy: NetworkPolicy | None = None,
         dockerfile: DockerfileLaunch | None = None,
         extra_config: Mapping[str, object] | None = None,
+        shared_volumes: Sequence[SharedVolumeMount] | None = None,
     ) -> None:
         """Create and wait for a sandbox to become ready.
 
@@ -200,6 +203,8 @@ class Sandbox:
                 ``inherit_entrypoint=True``.
             port_forwardings: Sandbox TCP ports exposed through the gateway.
             mounts: Additional read-only OCI or S3-backed mounts.
+            shared_volumes: Authorized external JuiceFS directories with explicit
+                read_only/read_write access; their data is not rolled back by reload.
             reverse_tunnel: SDK-side HTTP service exposed inside the sandbox.
             detached: Keep the sandbox alive when this client closes.
             node_id: Require placement on a specific AKernel node.
@@ -310,6 +315,9 @@ class Sandbox:
 
         ports = _normalize_ports(port_forwardings)
         mount_list = _normalize_mounts(mounts)
+        shared_mount_list = normalize_shared_mounts(
+            shared_volumes, [mount.target for mount in mount_list]
+        )
         normalized_extra_config = _normalize_extra_config(extra_config)
         if reverse_tunnel is not None:
             conflicts = set(ports).intersection(
@@ -360,6 +368,7 @@ class Sandbox:
             command_cwd=cwd,
             port_forwardings=tuple(ports),
             mounts=tuple(mount_list),
+            shared_volumes=shared_mount_list,
             reverse_tunnel=reverse_tunnel,
             detached=detached,
             failover=failover,
@@ -375,7 +384,12 @@ class Sandbox:
             ),
             extra_config=normalized_extra_config,
         )
-        self._session = load_backend().create(spec)
+        backend = load_backend()
+        if shared_mount_list and Capability.SHARED_VOLUMES not in backend.capabilities:
+            raise UnsupportedBackendFeatureError(
+                "The selected backend does not support shared volume mounts."
+            )
+        self._session = backend.create(spec)
         try:
             self._id = self._session.id
             self._files = Filesystem(self._session.files)

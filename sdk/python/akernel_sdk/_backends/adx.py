@@ -123,10 +123,9 @@ def _route_read_retryable(error: Exception) -> bool:
     for _ in range(4):
         if cause is None:
             break
-        if (
-            isinstance(cause, adx_environment.EnvironmentError)
-            and getattr(cause, "status_code", None) in (409, 503)
-        ):
+        if isinstance(cause, adx_environment.EnvironmentError) and getattr(
+            cause, "status_code", None
+        ) in (409, 503):
             return getattr(cause, "retry", None) != "never"
         cause = cause.__cause__
     return False
@@ -504,6 +503,7 @@ class AdxBackend:
         {
             Capability.S3_ROOTFS,
             Capability.NODE_PLACEMENT,
+            Capability.SHARED_VOLUMES,
         }
     )
 
@@ -516,6 +516,15 @@ class AdxBackend:
             gateway_use_tls=config.gateway_endpoint.use_tls,
             verify_tls=config.verify_tls,
         )
+
+    def shared_volumes(self) -> Any:
+        """Return a separately owned native metadata client, not a mount handle."""
+        factory = getattr(adx_environment, "SharedVolumes", None)
+        if not callable(factory):
+            raise UnsupportedBackendFeatureError(
+                "The installed adx SDK does not support shared volume management."
+            )
+        return factory(connection=self._connection)
 
     def pty_for(self, instance_id: str) -> Any:
         """Attach a PTY to an existing sandbox with the backend connection."""
@@ -610,6 +619,22 @@ class AdxBackend:
             ),
             connection=self._connection,
         )
+        if spec.shared_volumes:
+            if "shared-volume-mount-contract-v1" not in getattr(
+                adx_environment, "SDK_CAPABILITIES", ()
+            ):
+                raise UnsupportedBackendFeatureError(
+                    "The installed ADX SDK lacks shared volume mounts."
+                )
+            create_args["shared_volumes"] = [
+                adx_environment.SharedVolumeMount(
+                    volume_id=mount.volume_id,
+                    target=mount.target,
+                    access=mount.access,
+                    subpath=mount.subpath,
+                )
+                for mount in spec.shared_volumes
+            ]
         try:
             sandbox = _OwnedSandbox(**create_args)
         except Exception as error:
