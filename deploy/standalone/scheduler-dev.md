@@ -11,7 +11,7 @@
 
 运行 `python3 deploy/standalone/scheduler-dev.py --image sha256:<完整镜像身份>` 查看计划；加 `--apply` 执行。启动器只创建 `akernel-agent-dx-dev` 网络与 `akernel-agent-dx-dev-node` 容器，状态位于 `/data/akernel-agent-dx-dev/state`。不自动删除已有容器、物理沙箱或预算数据。
 
-容器限制为 4 核、16 GiB，CPU 绑定范围为 0–7，控制程序与运行时缓存预留 4 GiB。单个节点只通告固定的 3 核、12 GiB 和 16 GiB 磁盘容量。入口在受管理服务存活时每 10 秒核对原 cgroup 和状态目录、固定 CPU／内存上限、服务内存预留和最低磁盘剩余空间，再原子发布有效期为 60 秒的容量观测。来源目录被替换、上限变化或其他写入者修改容量文件时不续期，现有执行和对账继续运行，旧观测过期后节点关闭新任务准入；第二个续期者不能取得同一容量锁。展开部署后，入口将实际节点 ID 与固定容量一起写入 Coordinator 的 `host_budgets.BareMetal1`。这份容量与节点观测使用同一固定定义，但持久预算不随观测过期或节点离线消失。Coordinator 在开放服务前安装或核对配置，重启省略配置仍保留原账本，变更已安装的容量或归属会拒绝启动。本模板要求恰好一个 Coordinator 和一个节点；增加实际节点前须重新核对物理隔离、持久日志、端口和完整成员配置，不能通过复制节点通告来扩大宿主容量。匹配的 agent-dx 程序必须支持该配置与公开宿主预算视图；旧程序不能混用。此接线不等于多节点物理验收、独立动态额度或自动内存闭环，不支持动态超卖，不能作为高倍率吞吐证明。部署前运行 `python3 -m unittest discover -s deploy/standalone -p test_scheduler_capacity.py -v`，实际长期运行及失效关闭准入仍须在指定环境验收。
+容器限制为 4 核、16 GiB，CPU 绑定范围为 0–7，控制服务的内存使用上限为4GiB，尚未证明独占预留。单个节点只通告固定的 3 核、12 GiB 和 16 GiB 磁盘容量。入口在受管理服务存活时每 10 秒核对原 cgroup 和状态目录、固定 CPU／内存上限、服务内存上限和最低磁盘剩余空间，再原子发布有效期为 60 秒的容量观测。来源目录被替换、上限变化或其他写入者修改容量文件时不续期，现有执行和对账继续运行，旧观测过期后节点关闭新任务准入；第二个续期者不能取得同一容量锁。展开部署后，入口将实际节点 ID 与固定容量一起写入 Coordinator 的 `host_budgets.BareMetal1`。这份容量与节点观测使用同一固定定义，但持久预算不随观测过期或节点离线消失。Coordinator 在开放服务前安装或核对配置，重启省略配置仍保留原账本，变更已安装的容量或归属会拒绝启动。本模板要求恰好一个 Coordinator 和一个节点；增加实际节点前须重新核对物理隔离、持久日志、端口和完整成员配置，不能通过复制节点通告来扩大宿主容量。匹配的 agent-dx 程序必须支持该配置与公开宿主预算视图；旧程序不能混用。此接线不等于多节点物理验收、独立动态额度或自动内存闭环，不支持动态超卖，不能作为高倍率吞吐证明。部署前运行 `python3 -m unittest discover -s deploy/standalone -p test_scheduler_capacity.py -v`，实际长期运行及失效关闭准入仍须在指定环境验收。
 
 主机只在回环地址开放 19443 和 19080，分别映射 HTTPS 控制入口与 HTTP 数据入口。远程 SDK 使用独立 SSH 隧道访问，禁止复用其他实验入口。容器内部服务使用独立网络的网络隔离认证模式；公网入口仍验证管理员 API key。密钥只在首次启动时生成，写入权限为 0600 的持久文件，不进入日志和构建上下文。私有镜像仓库认证由操作员放入持久配置文件，不打进镜像。
 
@@ -66,3 +66,23 @@ sandboxd `[plugin.resource]` 的 `memory_high_ratio=0.75`，冲突配置拒绝�
 启用后SQLite版本3、中心存储版本8和daemon创建准入索引版本2会拒绝旧二进制。停用周期回收不会擦除既有拒绝边界。重启必须保留原数据库、锁、权威边界和事务清单；不能删除这些文件来恢复准入。完整历史身份的恢复只使用同Runtime、相同创建与删除意图、相同退役generation的已完成原事实。缺失或损坏存储仍须保持拒绝，不把记录缺席当成物理退役。
 
 配置检查使用 `python3 -m unittest discover -s deploy/standalone -p test_scheduler_history.py -v`。双节点验收夹具必须显式接入同一布尔开关及匹配入口摘要，不能把单节点启动器用作替换既有双节点环境的命令。
+
+## 严格预算下的宿主压力准入
+
+启动器增加可选 `--pressure-source /绝对目录/source.json`，默认不启用。它将来源文件所在目录只读挂载到 `/run/akernel-pressure`，传入 `AKERNEL_SCHEDULER_PRESSURE_SOURCE`，由入口给Coordinator配置 `host_pressure_admission.BareMetal1`、给节点配置同一 `host_pressure`。来源的观测路径必须位于该挂载目录，来源文件和观测文件不能同名。不能隐式停用已安装的压力契约；匹配中心安装后存储版本为9，重启必须提供相同来源。
+
+宿主程序 `deploy/standalone/scheduler-pressure.py --config /持久目录/observer.json` 作为独立受监督进程运行；镜像也安装同一文件至 `/usr/local/bin/scheduler-pressure.py`。观察者必须位于本任务可证明归属的控制cgroup，计入实验父组，且位于任何故障目标之外。双节点使用一个共同父cgroup和一个观察者，不为节点复制物理容量。当前单节点启动器不自动创建宿主观察者或替换双节点部署。
+
+观察者配置字段为 `identity`、`parent_path`、`parent_memory_max_bytes`、`parent_cpu_max`、`storage_pins`、`disk_path`、`output`、`valid_for_millis`、`sample_interval_millis` 和 `policy`。identity记录 `host_id`、`authority`、`boot_id`、`parent_device`、`parent_inode`、`storage_identity_sha256`；storage_pins逐项保存原目录或SQLite文件的path／device／inode，其排序保持的规范JSON摘要使用 `identity_digest()` 生成。来源文件使用相同identity，以及观测文件在容器中的path和max_age_millis。身份由部署者在隔离状态下生成，不能从不受信任的节点标签获取。
+
+策略字段为 `memory_high_per_mille`、`memory_low_per_mille`、`psi_high_per_mille`、`psi_low_per_mille`、`disk_high_per_mille`、`disk_low_per_mille`、`recovery_millis` 和 `minimum_disk_available_bytes`。推荐严格开发配置为内存750／650、内存PSI20／5、磁盘900／800、连续低水位5000毫秒、最低磁盘余量16GiB，采样1000毫秒、有效期3000毫秒。PSI取some的avg10并换算为千分比。任一高水位或不足的磁盘余量立即关闸；全部回到低水位并持续满足恢复窗口后才开闸。首次启动、采样失败、超时和超过有效期的采样中断均重新关闭；一次采样必须在采样间隔以内完成，时间戳取采样开始时刻。
+
+观察者使用排他文件锁及fsync后的原子替换，不覆盖软链接。来源目录、原父cgroup、CPU／内存上限、Linux启动身份或持久目录身份不符就发布关闭；进程被杀或发布失败后原文件自行过期。启动后修改观察者磁盘配置不会热更新已固定的身份和策略，须显式受控重启。掉电、丢盘或一致旧备份恢复必须先隔离和人工核对权威；没有备份外不可回退水位，不能宣称自动检测原地回退。
+
+资源账目将出生额度、已确认额外额度、在途额外预留分别登记；未知结果及恢复占用作为交叉视图。未授权的允许上限不计作已经取得的容量。各节点服务内存上限不是独占预留，父组与12GiB预算的差额也不是独占控制或恢复保证。当前独占控制、检查点和恢复应急预留均为零；观察者和控制服务的实际使用计入父组，物理峰值独立记录。压力关闭不改变原预算，缩容和精确结算继续执行，扩容授权仍有原deadline和每步至多两倍的策略增长约束。
+
+运行 `python3 -I -B -m unittest discover -s deploy/standalone -p 'test_scheduler*.py' -v` 验证配置、压力与既有容量、内存、I/O、监督边界。真实阈值、关闸时延、正值预算保持、恢复拒绝、服务重启及最终库存仍须对匹配候选独立验收。
+
+节点完整可用性仍限制新增自动策略。压力关闭允许既有授权缩容及精确结算，不使缺少容量或生命周期就绪证明的节点获得新自动授权。
+
+消费端同样直接检查所在Linux宿主的boot ID，拒绝旧启动期间仍未到期的观测。本配置只覆盖同宿主中心和节点，跨宿主观测传输与验证另行开发。

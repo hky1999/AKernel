@@ -45,6 +45,43 @@ def configure_history_reclamation(expanded, enabled):
     nodes[0]["config"]["history_reclamation"] = enabled
 
 
+def read_host_pressure_source():
+    value = os.environ.get("AKERNEL_SCHEDULER_PRESSURE_SOURCE")
+    if value is None:
+        return None
+    path = Path(value)
+    if path.parent != Path("/run/akernel-pressure") or path.is_symlink():
+        raise RuntimeError("压力来源必须是只读压力目录中的真实文件")
+    if path.stat().st_size > 8192:
+        raise RuntimeError("压力来源配置超过大小限制")
+    source = json.loads(path.read_text())
+    if (set(source) != {"path", "identity", "max_age_millis"}
+            or Path(source["path"]).parent != path.parent
+            or source["identity"].get("host_id") != "BareMetal1"
+            or type(source["max_age_millis"]) is not int
+            or not 100 <= source["max_age_millis"] <= 60000):
+        raise RuntimeError("压力来源身份、路径或有效期无效")
+    return source
+
+
+def configure_host_pressure(expanded, source):
+    coordinators = [s for s in expanded["services"] if s["role"] == "coordinator"]
+    nodes = [s for s in expanded["services"] if s["role"] == "adxlet"]
+    if len(coordinators) != 1 or len(nodes) != 1:
+        raise RuntimeError("压力配置要求单个中心和节点")
+    if source is None:
+        if "host_pressure_admission" in coordinators[0]["config"] or "host_pressure" in nodes[0]["config"]:
+            raise RuntimeError("不能隐式停用已有压力准入")
+        return
+    if source["identity"]["host_id"] != "BareMetal1":
+        raise RuntimeError("压力来源必须绑定固定宿主预算")
+    expected = {"BareMetal1": source}
+    if coordinators[0]["config"].get("host_pressure_admission", expected) != expected or nodes[0]["config"].get("host_pressure", source) != source:
+        raise RuntimeError("展开配置已有不同压力来源")
+    coordinators[0]["config"]["host_pressure_admission"] = expected
+    nodes[0]["config"]["host_pressure"] = source
+
+
 def configure_memory_control(expanded, sandboxd_text, enabled):
     """为单节点实验同时配置中心策略和守护进程的软节流比例。"""
     coordinators = [service for service in expanded["services"]
@@ -71,7 +108,7 @@ def configure_memory_control(expanded, sandboxd_text, enabled):
 
 
 def fixed_capacity():
-    """返回本实验明确预留的容量，不使用主机瞬时空闲量。"""
+    """返回本实验的固定工作负载预算，不使用主机瞬时空闲量。"""
     return {"cpu_millis": 3000, "memory_bytes": 12 * 1024**3,
             "disk_bytes": 16 * 1024**3}
 
@@ -161,7 +198,7 @@ class FixedCapacityLease:
         if (CGROUP / "memory.max").read_text().strip() != str(16 * 1024**3):
             raise RuntimeError("开发环境的固定内存上限发生变化")
         if (CGROUP / "services/memory.max").read_text().strip() != str(4 * 1024**3):
-            raise RuntimeError("控制服务的内存预留发生变化")
+            raise RuntimeError("控制服务的内存上限发生变化")
         if shutil.disk_usage(STATE).free < 16 * 1024**3:
             raise RuntimeError("磁盘剩余空间不足以维持固定开发容量")
         path = STATE / "adx/capacity.json"
@@ -196,7 +233,7 @@ def prepare_cgroup(*, io_accounting=False):
 def prepare_config(templates=Path("/etc/akernel/dev-templates"),
                    output=Path("/etc/akernel/adx-standalone.yaml"),
                    adxctl="/opt/adx/current/bin/adxctl", *, elastic_memory=False,
-                   history_reclamation=False):
+                   history_reclamation=False, pressure_source=None):
     config = STATE / "sandboxd/config"
     config.mkdir(parents=True, exist_ok=True)
     for name in ("config.json", "oss.json", "registry.json", "oss_auths.json"):
@@ -264,6 +301,7 @@ def prepare_config(templates=Path("/etc/akernel/dev-templates"),
         [adxctl, "--config", str(output), "config", "dump"], text=True))
     configure_host_budget(expanded)
     configure_history_reclamation(expanded, history_reclamation)
+    configure_host_pressure(expanded, pressure_source)
     text = configure_memory_control(expanded, text, elastic_memory)
     (STATE / "sandboxd/config.toml").write_text(text)
     for service in expanded["services"]:
@@ -394,7 +432,8 @@ def main():
     elastic_memory = elastic_memory_enabled()
     history_reclamation = history_reclamation_enabled()
     prepare_cgroup(io_accounting=elastic_memory)
-    prepare_config(elastic_memory=elastic_memory, history_reclamation=history_reclamation)
+    prepare_config(elastic_memory=elastic_memory, history_reclamation=history_reclamation,
+                   pressure_source=read_host_pressure_source())
     capacity_lease = FixedCapacityLease()
     try:
         subprocess.run(["/usr/local/bin/sandboxd-network-prepare"], check=True)

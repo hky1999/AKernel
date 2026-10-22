@@ -14,6 +14,7 @@ RUN cd / && sha256sum --check /opt/akernel/SHA256SUMS
 COPY source/builder/scripts/adx-service.sh /usr/local/bin/adx-service
 COPY source/builder/scripts/sandboxd_network_prepare.sh /usr/local/bin/sandboxd-network-prepare
 COPY source/deploy/standalone/scheduler-dev-entrypoint.py /usr/local/bin/scheduler-dev-entrypoint.py
+COPY source/deploy/standalone/scheduler-pressure.py /usr/local/bin/scheduler-pressure.py
 COPY source/deploy/standalone/config/ /etc/akernel/dev-templates/
 RUN chmod 0755 /usr/local/bin/adx-service /usr/local/bin/sandboxd-network-prepare && \
     update-alternatives --set iptables /usr/sbin/iptables-legacy && \
