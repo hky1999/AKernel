@@ -47,11 +47,27 @@ from .base import (
     SandboxSpec,
     SnapshotRestoreSpec,
 )
-from .errors import BackendOperationError, UnsupportedBackendFeatureError
+from .errors import (
+    BackendOperationError,
+    UnsupportedBackendFeatureError,
+    retain_failure_context,
+)
 
 _NAMESPACE = "default"
 _DEFAULT_LISTEN_PORT = 8766
+# Pinned ADX reserves 30s for initialization and 30s for create handoff. Below
+# this reserve it either rejects the budget or silently increases it.
+_CREATE_RESERVE_SECONDS = 60
 logger = logging.getLogger(__name__)
+
+
+def _validate_restore_timeout(schedule_timeout: int, timeout: int) -> None:
+    minimum = schedule_timeout + _CREATE_RESERVE_SECONDS
+    if timeout < minimum:
+        raise ValueError(
+            "restore timeout must be at least schedule_timeout + 60 seconds "
+            f"({minimum} seconds for this source)"
+        )
 
 
 @dataclass(frozen=True)
@@ -187,6 +203,7 @@ def _convert_error(operation: str, error: Exception) -> BackendOperationError:
         failure=getattr(error, "failure", None),
         probe_failure=getattr(error, "probe_failure", None),
         request_forwarded=getattr(error, "request_forwarded", None),
+        cleanup_errors=getattr(error, "cleanup_errors", ()) or (),
     )
 
 
@@ -440,6 +457,8 @@ class _Session:
         self._connection = connection
         self._terminated = False
         self._closed = False
+        self._network_policy = spec.network_policy
+        self._network_policy_known = True
 
     def is_running(self) -> bool:
         if self._terminated or self._closed:
@@ -479,6 +498,19 @@ class _Session:
     ) -> ForkOutcome:
         if self._terminated or self._closed:
             raise BackendOperationError("fork failed: sandbox is closed")
+        if not self._network_policy_known:
+            raise BackendOperationError(
+                "fork requires a confirmed source network policy; reapply it first",
+                code="NETWORK_POLICY_UNCONFIRMED",
+                outcome="not_started",
+                environment_id=self.id,
+            )
+        timeout = (
+            self._spec.schedule_timeout + _CREATE_RESERVE_SECONDS
+            if restore_timeout is None
+            else restore_timeout
+        )
+        _validate_restore_timeout(self._spec.schedule_timeout, timeout)
         # The pinned ADX API has snapshot/create/delete primitives, not a batch
         # fork route. Capture once and keep the snapshot until all creates settle.
         snapshot = self.create_snapshot(None, snapshot_timeout)
@@ -491,11 +523,7 @@ class _Session:
                     self._spec.idle_timeout if idle_timeout is None else idle_timeout
                 ),
                 schedule_timeout=self._spec.schedule_timeout,
-                timeout=(
-                    self._spec.schedule_timeout + 60
-                    if restore_timeout is None
-                    else restore_timeout
-                ),
+                timeout=timeout,
                 name=None,
                 command_cwd=self._spec.command_cwd,
                 port_forwardings=self._spec.port_forwardings,
@@ -504,8 +532,9 @@ class _Session:
                 detached=False,
                 failover=self._spec.failover,
                 node_id=None,
-                # Inherit the captured policy, including updates after creation.
-                network_policy=None,
+                # ADX restores resources but not execution network policy.
+                # Send the last acknowledged policy atomically with creation.
+                network_policy=self._network_policy,
             )
             for _ in range(count):
                 try:
@@ -612,8 +641,16 @@ class _Session:
         native_policy = None if policy is None else _native_network_policy(policy)
         try:
             update(native_policy)
-        except Exception as error:
-            raise _convert_error("update network policy", error) from error
+        except BaseException as error:
+            # A failed response/reconnect can follow a committed replacement.
+            # Require an explicit successful reapply before deriving children.
+            self._network_policy_known = False
+            if isinstance(error, Exception):
+                raise _convert_error("update network policy", error) from error
+            retain_failure_context(error, self.id)
+            raise
+        self._network_policy = policy
+        self._network_policy_known = True
 
     def terminate(self) -> None:
         if self._terminated:
@@ -630,13 +667,15 @@ class _Session:
         try:
             adx_environment.Environment.delete(self.id, connection=self._connection)
         except Exception as error:
+            failure = _convert_error("terminate sandbox", error)
+            retain_failure_context(failure, self.id, close_error)
             if close_error is not None:
                 logger.warning(
                     "Local cleanup also failed for sandbox %s: %s",
                     self.id,
                     close_error,
                 )
-            raise _convert_error("terminate sandbox", error) from error
+            raise failure from error
         self._terminated = True
         if close_error is not None:
             raise close_error
@@ -655,10 +694,76 @@ class _Session:
 class _OwnedSandbox(adx_environment.Environment):
     """Native handle whose lifecycle is owned by the AKernel session."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        try:
+            super().__init__(*args, **kwargs)
+        except BaseException as error:
+            # Native 0.1.0rc2 catches Exception only, and can lose a known ID
+            # when tunnel bootstrap fails. Retain ownership until construction
+            # returns, including Ctrl+C before a _Session exists.
+            identity = getattr(self, "_sid", "")
+            if identity:
+                retain_failure_context(error, identity)
+            client = getattr(self, "_client", None)
+            if client is not None:
+                try:
+                    if not getattr(self, "_closed", False):
+                        self.close()
+                except Exception as cleanup_error:
+                    if identity:
+                        retain_failure_context(error, identity, cleanup_error)
+                try:
+                    client.close()
+                except Exception as cleanup_error:
+                    if identity:
+                        retain_failure_context(error, identity, cleanup_error)
+            if identity:
+                try:
+                    # A fresh client makes rollback retryable even if native
+                    # construction already closed its transport after failure.
+                    adx_environment.Environment.delete(
+                        identity, connection=kwargs.get("connection")
+                    )
+                except Exception as cleanup_error:
+                    retain_failure_context(error, identity, cleanup_error)
+                    logger.warning(
+                        "failed to roll back constructing sandbox %s",
+                        identity,
+                        exc_info=True,
+                    )
+            raise
+
     def __del__(self) -> None:
         # GC can run while HTTPX holds a non-reentrant pool lock. Network
         # deletion and transport closure belong to explicit session cleanup.
         pass
+
+
+def _rollback_created(
+    failure: BaseException,
+    sandbox: Any,
+    connection: Any,
+    session: BackendSession | None,
+) -> None:
+    """Rollback a known create without replacing its original failure."""
+    identity = str(sandbox.id)
+    retain_failure_context(failure, identity)
+    if session is not None:
+        try:
+            session.terminate()
+        except Exception as cleanup_error:
+            retain_failure_context(failure, identity, cleanup_error)
+            logger.warning("failed to clean up sandbox %s", identity, exc_info=True)
+        return
+    for cleanup in (
+        sandbox.close,
+        lambda: adx_environment.Environment.delete(identity, connection=connection),
+    ):
+        try:
+            cleanup()
+        except Exception as cleanup_error:
+            retain_failure_context(failure, identity, cleanup_error)
+            logger.warning("failed to clean up sandbox %s", identity, exc_info=True)
 
 
 class AdxBackend:
@@ -762,8 +867,9 @@ class AdxBackend:
             sandbox = _OwnedSandbox(**create_args)
         except Exception as error:
             raise _convert_error("create sandbox", error) from error
-        session = _Session(sandbox, spec, self._connection)
+        session = None
         try:
+            session = _Session(sandbox, spec, self._connection)
             # Creation is authoritative before Edge necessarily applies the
             # next route-stream delta. A read-only direct operation closes
             # that gap so the first caller operation does not observe 503.
@@ -778,32 +884,21 @@ class AdxBackend:
                         raise
                     time.sleep(min(retry_delay, max(0, deadline - time.monotonic())))
                     retry_delay = min(retry_delay * 2, 1.0)
-        except Exception:
-            try:
-                session.terminate()
-            except Exception:
-                logger.warning(
-                    "failed to clean up sandbox after direct route readiness failure",
-                    exc_info=True,
-                )
+        except BaseException as error:
+            _rollback_created(error, sandbox, self._connection, session)
             raise
         if spec.command_cwd is not None:
             try:
                 # The public constructor creates its working directory; the
                 # native SDK only uses cwd as a command default.
                 sandbox.files.make_dir(spec.command_cwd)
-            except Exception as error:
-                try:
-                    session.terminate()
-                except Exception:
-                    logger.warning(
-                        "Failed to roll back sandbox %s after cwd initialization",
-                        session.id,
-                        exc_info=True,
-                    )
-                raise _convert_error(
-                    f"initialize sandbox cwd {spec.command_cwd!r}", error
-                ) from error
+            except BaseException as error:
+                _rollback_created(error, sandbox, self._connection, session)
+                if isinstance(error, Exception):
+                    raise _convert_error(
+                        f"initialize sandbox cwd {spec.command_cwd!r}", error
+                    ) from error
+                raise
         return session
 
     def from_snapshot(self, spec: SnapshotRestoreSpec) -> BackendSession:
@@ -811,6 +906,7 @@ class AdxBackend:
 
     @staticmethod
     def _restore_snapshot(spec: SnapshotRestoreSpec, connection: Any) -> BackendSession:
+        _validate_restore_timeout(spec.schedule_timeout, spec.timeout)
         tunnel = spec.reverse_tunnel
         if tunnel is not None and tunnel.reverse_port != tunnel.listen_port - 1:
             raise UnsupportedBackendFeatureError(
@@ -846,8 +942,9 @@ class AdxBackend:
             )
         except Exception as error:
             raise _convert_error("restore snapshot", error) from error
-        session = _Session(sandbox, spec, connection)
+        session = None
         try:
+            session = _Session(sandbox, spec, connection)
             deadline = min(started + spec.timeout, time.monotonic() + 10)
             while True:
                 try:
@@ -858,17 +955,7 @@ class AdxBackend:
                         raise
                     time.sleep(min(0.1, max(0, deadline - time.monotonic())))
         except BaseException as error:
-            try:
-                session.terminate()
-            except Exception:
-                if (
-                    isinstance(error, BackendOperationError)
-                    and error.environment_id is None
-                ):
-                    error.environment_id = session.id
-                logger.warning(
-                    "failed to clean up restored sandbox %s", session.id, exc_info=True
-                )
+            _rollback_created(error, sandbox, connection, session)
             raise
         return session
 

@@ -23,6 +23,7 @@ from types import MappingProxyType
 
 from ._addresses import gateway_endpoint_from_env
 from ._backends.base import BackendSession, SandboxSpec, SnapshotRestoreSpec
+from ._backends.errors import retain_failure_context
 from ._backends.registry import load_backend
 from ._dockerfile_launch import DockerfileLaunch
 from ._fork import ForkCleanupError
@@ -399,18 +400,21 @@ class Sandbox:
                     run_timeout=dockerfile.run_timeout,
                 )
                 self._startup_command = apply_result.startup_command
-        except Exception:
+        except BaseException as failure:
+            retain_failure_context(failure, self._session.id)
             self._closed = True
             try:
                 self._session.terminate()
-            except Exception:
+            except Exception as error:
+                retain_failure_context(failure, self._session.id, error)
                 logger.warning(
                     "failed to roll back a partially initialized sandbox",
                     exc_info=True,
                 )
             try:
                 self._session.close()
-            except Exception:
+            except Exception as error:
+                retain_failure_context(failure, self._session.id, error)
                 logger.warning(
                     "failed to close a partially initialized sandbox session",
                     exc_info=True,
@@ -448,14 +452,17 @@ class Sandbox:
 
         Like E2B, return one ordered Sandbox or Exception per requested child;
         partial failures keep successful siblings. Capture failures raise.
-        The source keeps its identity and lifetime. Children inherit captured
-        resources/policy and rebind this client's cwd, ports, mounts and tunnel.
+        The source keeps its identity and lifetime. Children inherit resources
+        and this client's acknowledged policy, cwd, ports, mounts and tunnel.
         They are owned handles, including when the source is detached.
 
         ``count`` is 1..20. All timeouts use seconds: ``snapshot_timeout`` bounds
-        capture (1..3600), ``restore_timeout`` bounds each child creation (default
-        source schedule_timeout + 60), and ``idle_timeout`` overrides the source
-        idle timeout for children. No E2B-style absolute lifetime is promised.
+        capture (1..3600), ``restore_timeout`` is each child's logical create
+        budget (minimum/default source schedule_timeout + 60), and
+        ``idle_timeout`` overrides the source idle timeout for children.
+        Invalid create budgets fail before capture. Transport margins, tunnel
+        setup and cleanup add elapsed time; this is not an overall wall-clock
+        deadline or an E2B-style absolute lifetime.
 
         The ADX adapter currently composes snapshot/create/delete requests,
         creating children sequentially. Temporary snapshot deletion is requested
@@ -595,10 +602,12 @@ class Sandbox:
         Inherits captured runtime, resource geometry and process state; does not
         rerun Dockerfile setup or the image entrypoint. The source is unaffected.
         Rebind client-side tunnels, ports and mounts explicitly as needed.
-        ``cwd`` sets a command default without creating directories. Omitted
-        network policy inherits the snapshot policy; use
-        ``update_network_policy(None)`` to explicitly clear it after restore.
-        ``timeout`` bounds creation (default schedule_timeout + 60 seconds).
+        ``cwd`` sets a command default without creating directories. Supply
+        ``network_policy`` explicitly to restore restrictions: the pinned ADX
+        backend uses its default if omitted or empty. ``timeout`` is the logical
+        create budget, at least schedule_timeout + 60 seconds (also the default).
+        Shorter budgets raise ValueError before creation; transport, tunnel and
+        cleanup overhead can add elapsed time.
         The SDK never starts a second logical restore to hide a failed one;
         the transport may retry the same operation using a stable request ID.
         Client handles from the source must not be reused against the new sandbox.
@@ -686,10 +695,12 @@ class Sandbox:
             result._files = Filesystem(result._session.files)
             result._commands = Commands(result._session.commands)
             result._pty = Pty(result._id, driver=result._session.pty)
-        except BaseException:
+        except BaseException as failure:
+            retain_failure_context(failure, result._session.id)
             try:
                 result._session.terminate()
             except Exception as error:
+                retain_failure_context(failure, result._session.id, error)
                 if cleanup_failures is not None:
                     cleanup_failures.append((result, error))
                 logger.warning(

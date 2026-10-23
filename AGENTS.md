@@ -422,9 +422,21 @@ Do not describe it as a single server-side request. Fork children are owned
 handles, even for a detached source. Keep temporary snapshot cleanup and
 `ForkCleanupError`'s retained child handles visible and retryable. Idle timeout
 is not an absolute sandbox lifetime; snapshot/restore timeouts bound operations.
+Restore budgets below schedule_timeout + 60 fail before creating an environment
+or taking a fork snapshot. They are logical frontend budgets, not wall-clock
+deadlines for client bootstrap/cleanup. Preserve known IDs and cleanup_errors
+through constructor, route and facade failures, including BaseException during
+tunnel bootstrap. The pinned ADX restore does not inherit network policy:
+from_snapshot callers must supply restrictions explicitly. Fork sends the source
+client's acknowledged policy during creation and refuses to capture after an
+unconfirmed policy update until it has been successfully reapplied.
 Run `sdk/python/tests/integration/test_fork.py` with explicit integration opt-in
 and a complete Python root image to validate memory/FD and private-write
 isolation. This is distinct from a read-only CLI mount image.
+The companion test_fork_network.py verifies per-child tunnels/published ports,
+creation-time and updated policy inheritance, and isolated child policy clear
+against a reachable outbound baseline. Keep host services and all owned children
+cleaned on both failure and success.
 
 Select Kata explicitly only when the cluster has an eligible node:
 

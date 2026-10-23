@@ -60,13 +60,12 @@ while True:
 """
 
 
-@unittest.skipUnless(_ENABLED and _IMAGE, "enable integration and set a python3 image")
-class ForkIntegrationTest(unittest.TestCase):
+class ForkIntegrationFixture:
     def setUp(self):
         self.handles = []
         self.snapshot_ids = []
         self.addCleanup(self.cleanup_resources)
-        source = Sandbox(
+        options = dict(
             image=_IMAGE,
             runtime=os.environ.get("AKERNEL_TEST_RUNTIME", "runsc"),
             cpu=1000,
@@ -76,6 +75,8 @@ class ForkIntegrationTest(unittest.TestCase):
             schedule_timeout=180,
             cwd="/tmp",
         )
+        options.update(getattr(self, "sandbox_options", {}))
+        source = Sandbox(**options)
         self.source = source
         self.handles.append(source)
         probe = source.commands.run("python3 --version")
@@ -128,6 +129,9 @@ class ForkIntegrationTest(unittest.TestCase):
             raise RuntimeError("owned fork resources did not clean up") from errors[0]
         print("owned handles and snapshots cleaned", flush=True)
 
+
+@unittest.skipUnless(_ENABLED and _IMAGE, "enable integration and set a python3 image")
+class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
     def witness(self, sandbox, action="inspect"):
         request = {"id": uuid.uuid4().hex, "action": action}
         sandbox.files.write("/tmp/fork-acceptance/request", json.dumps(request))

@@ -24,6 +24,7 @@ from akernel_sdk import (
     BackendOperationError,
     ForkCleanupError,
     HttpReverseTunnel,
+    NetworkPolicy,
     Sandbox,
     SandboxInfo,
     SnapshotInfo,
@@ -249,11 +250,42 @@ class NativeForkTest(unittest.TestCase):
     def test_all_children_can_fail_and_snapshot_is_still_deleted(self):
         failure = BackendOperationError("no capacity")
         self.restore.side_effect = failure
-        outcome = self.source.fork(2, 120, 60, 20)
+        outcome = self.source.fork(2, 120, 60, 120)
         self.assertEqual(outcome.results, [failure, failure])
         self.assertEqual(self.restore.call_args.args[0].idle_timeout, 120)
-        self.assertEqual(self.restore.call_args.args[0].timeout, 20)
+        self.assertEqual(self.restore.call_args.args[0].timeout, 120)
         self.delete.assert_called_once()
+
+    def test_acknowledged_policy_update_is_sent_in_each_child_create(self):
+        policy = NetworkPolicy.block()
+        self.source.update_network_policy(policy)
+        self.restore.side_effect = [child("first"), child("second")]
+        self.source.fork(2, None, 60, None)
+        for call in self.restore.call_args_list:
+            self.assertIs(call.args[0].network_policy, policy)
+
+    def test_unconfirmed_policy_update_blocks_fork_until_successful_reapply(self):
+        self.native.update_network_policy.side_effect = RuntimeError("lost response")
+        with self.assertRaises(BackendOperationError):
+            self.source.update_network_policy(NetworkPolicy.block())
+        with self.assertRaises(BackendOperationError) as raised:
+            self.source.fork(2, None, 60, None)
+        self.assertEqual(raised.exception.code, "NETWORK_POLICY_UNCONFIRMED")
+        self.assertEqual(raised.exception.outcome, "not_started")
+        self.capture.assert_not_called()
+        self.native.update_network_policy.side_effect = None
+        self.source.update_network_policy(None)
+        self.restore.return_value = child("after-reapply")
+        self.source.fork(1, None, 60, None)
+        self.assertIsNone(self.restore.call_args.args[0].network_policy)
+
+    def test_interrupted_policy_update_blocks_fork_before_capture(self):
+        self.native.update_network_policy.side_effect = KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            self.source.update_network_policy(NetworkPolicy.block())
+        with self.assertRaises(BackendOperationError):
+            self.source.fork(1, None, 60, None)
+        self.capture.assert_not_called()
 
     def test_capture_failure_raises_without_creates_or_unknown_snapshot_deletion(self):
         failure = BackendOperationError(

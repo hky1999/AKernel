@@ -588,9 +588,10 @@ working-directory creation. `cwd` only sets the command default. `idle_timeout`
 `detached`, `failover`, `node_id`, `port_forwardings`, `mounts`, `reverse_tunnel`
 and `network_policy` configure the new environment/client. Rebind the local
 `HttpReverseTunnel` target explicitly; source client sockets/PTYs/Python handles
-are not restored. An omitted network policy inherits the captured policy;
-call `restored.update_network_policy(None)` to explicitly clear it. A supplied
-policy is applied during creation. Empty policy also inherits during creation.
+are not restored. Supply `network_policy` explicitly to preserve restrictions:
+the pinned ADX backend does not inherit captured execution policy on restore.
+An omitted or empty policy uses the backend default. A supplied policy is
+applied during creation, before the restored workload is made available.
 For mounted external data, consistency and availability remain the caller's
 responsibility; restore does not copy node-local HostPath storage.
 
@@ -617,11 +618,22 @@ memory has been restored.
 operation ID when supplied. Snapshot creation makes one request attempt. Restore
 uses the native transport's same-operation retries (stable request ID); the
 public SDK does not initiate a second logical restore. On unknown outcome,
-reconcile using the supplied IDs instead of blindly calling create/restore
-again. Read-only route readiness checks retry temporary 409/503 responses for
-up to 10 seconds within the restore timeout, without recreating the sandbox.
-Initialization failures attempt to delete the known-created clone and preserve
-the original error. See [`examples/snapshots.py`](./examples/snapshots.py).
+reconcile using the supplied identity instead of blindly calling create/restore
+again. Before creation is confirmed, native unknown-outcome context can contain
+a lookup name rather than a canonical ID; do not pass it blindly to `ak delete`.
+After creation is confirmed, failure context retains the canonical ID. Read-only
+route checks retry temporary 409/503 responses within a 10-second retry window,
+without recreating the sandbox. A blocking transport call is separately bounded.
+Initialization failures, including interruption during tunnel startup, attempt
+to delete the known-created clone and preserve the original error. Failed
+rollback errors remain in `cleanup_errors` for diagnosis and explicit retry.
+See [`examples/snapshots.py`](./examples/snapshots.py).
+
+`timeout` must be at least `schedule_timeout + 60` seconds; shorter budgets raise
+`ValueError` before a create request. This prevents the pinned native SDK from
+silently increasing the supplied budget. It is the frontend's logical creation
+budget, not a wall-clock deadline for the entire Python call: transport margins,
+tunnel/readiness setup, metadata binding and cleanup can add elapsed time.
 
 ## Fork a running sandbox
 
@@ -666,9 +678,15 @@ known children even when one deletion fails, and preserves workload exceptions.
 | `count=1` | Integer 1..20; booleans are rejected. |
 | `idle_timeout=None` | Child idle timeout in seconds; omitted inherits the source's configured idle timeout. Zero disables idle expiry. |
 | `snapshot_timeout=300` | Capture operation deadline in seconds, 1..3600. |
-| `restore_timeout=None` | Deadline per child creation in seconds; defaults to the source's schedule timeout + 60. |
+| `restore_timeout=None` | Logical creation budget per child in seconds; minimum/default is the source's schedule timeout + 60. Checked before capture. |
 
-Children inherit captured resources and the current captured network policy;
+Children inherit captured resources. Fork explicitly supplies the source
+client's last acknowledged network policy with each create request, including
+successful policy updates since source creation. After an uncertain/interrupted
+policy update it refuses to capture until a policy is successfully reapplied.
+Serialize policy changes and captures in the application. This differs from a
+bare `from_snapshot()` call, which requires an explicit policy for restrictions.
+As with restore, the logical create budget excludes client/transport overhead;
 the client's cwd, declared ports, mounts and reverse tunnel are rebound with
 fresh handles. Children are non-detached owned handles even if the source is
 detached. Writes to each child's captured root filesystem and process memory
@@ -698,11 +716,12 @@ The count/ordered partial-result convention follows
   The corresponding failures are in `child_cleanup_errors`.
 
 Unknown capture/create outcomes preserve `BackendOperationError` request and
-environment IDs; the SDK does not initiate an extra logical attempt. An
-unconfirmed create may still exist remotely. Reconcile using those IDs and,
-when appropriate, `ak delete <environment-id>`, rather than deleting unrelated
-resources. Interruption attempts to delete all known children and the temporary
-snapshot; cleanup failures are logged with owned IDs.
+lookup identity; the SDK does not initiate an extra logical attempt. An
+unconfirmed create may still exist remotely. Distinguish native lookup names
+from canonical IDs when reconciling. Confirmed-created IDs, including failures
+during native bootstrap or public binding, remain in `environment_id`; rollback
+failures remain in `cleanup_errors`. Interruption attempts to delete all known
+children and the temporary snapshot, retaining its original exception type.
 
 Run real isolation, partial-failure and cleanup acceptance on a supporting
 deployment using a complete image that contains Python 3 (not a CLI mount image):
@@ -712,6 +731,19 @@ AKERNEL_RUN_INTEGRATION=1 \
 AKERNEL_TEST_IMAGE=python:3.13-slim-bookworm \
 PYTHONPATH=sdk/python \
 python sdk/python/tests/integration/test_fork.py
+```
+
+The companion `tests/integration/test_fork_network.py` covers two independent
+tunnels (default and custom listen ports), private published-port responses,
+creation-time and updated deny policy, and isolated child policy clearing.
+It first verifies an allowed TCP baseline against `AKERNEL_TEST_EGRESS_HOST`
+(default `1.1.1.1`) and `AKERNEL_TEST_EGRESS_PORT` (443); an unreachable baseline
+fails instead of producing a false policy pass. Run both suites with:
+
+```bash
+AKERNEL_RUN_INTEGRATION=1 AKERNEL_TEST_IMAGE=python:3.13-slim-bookworm \
+PYTHONPATH=sdk/python python -m unittest \
+  tests.integration.test_fork tests.integration.test_fork_network -v
 ```
 
 The partial-failure case injects one client-side error before its child create;
@@ -1119,7 +1151,9 @@ not part of the default test suite.
 public exception: `code`, `retry`, `outcome`, `request_id`, `operation_id`,
 `environment_id`, `status_code`, `scheduling_failure`, `failure`,
 `probe_failure`, and `request_forwarded`. Fields absent from the backend response
-are `None`; the original exception remains in `__cause__`.
+are `None`; the original exception remains in `__cause__`. `cleanup_errors` is a
+tuple of rollback failures (empty when absent). Known-created IDs and these
+errors are also attached to interruption exceptions without changing their type.
 
 ```python
 from akernel_sdk import BackendOperationError, Sandbox
