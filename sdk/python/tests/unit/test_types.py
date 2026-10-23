@@ -98,6 +98,7 @@ assert get_type_hints(apply_dockerfile)['sb'] is Sandbox
                 "BackendNotInstalledError",
                 "UnsupportedBackendFeatureError",
                 "BackendOperationError",
+                "ForkCleanupError",
                 "DockerContext",
                 "DockerfileLaunch",
                 "DockerContextEntry",

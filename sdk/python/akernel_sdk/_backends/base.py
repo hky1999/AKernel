@@ -195,6 +195,14 @@ class BackendSession(Protocol):
 
     def create_snapshot(self, name: str | None, timeout: int) -> SnapshotInfo: ...
 
+    def fork(
+        self,
+        count: int,
+        idle_timeout: int | None,
+        snapshot_timeout: int,
+        restore_timeout: int | None,
+    ) -> ForkOutcome: ...
+
     def reload(self) -> bool: ...
 
     def wait_entrypoint(self) -> int: ...
@@ -207,6 +215,15 @@ class BackendSession(Protocol):
     def terminate(self) -> None: ...
 
     def close(self) -> None: ...
+
+
+@dataclass
+class ForkOutcome:
+    """Known child results and acknowledgement of temporary snapshot deletion."""
+
+    snapshot_id: str
+    results: list[BackendSession | Exception]
+    cleanup_error: Exception | None = None
 
 
 class Backend(Protocol):

@@ -415,6 +415,16 @@ stable public SDK interface. Reusable snapshots are a separate public contract:
 `delete_snapshot()` and `Sandbox.from_snapshot()` operate on independent snapshot
 IDs. Keep backend-native types and lifecycle/connection work in `_backends`;
 restore must inherit captured resources and must not rerun fresh-boot setup.
+`sandbox.fork(count=N)` captures once and returns an ordered Sandbox/Exception
+per child, preserving partial successes. The pinned ADX SDK/API has no native
+batch fork; the adapter composes reusable snapshot/create/delete operations.
+Do not describe it as a single server-side request. Fork children are owned
+handles, even for a detached source. Keep temporary snapshot cleanup and
+`ForkCleanupError`'s retained child handles visible and retryable. Idle timeout
+is not an absolute sandbox lifetime; snapshot/restore timeouts bound operations.
+Run `sdk/python/tests/integration/test_fork.py` with explicit integration opt-in
+and a complete Python root image to validate memory/FD and private-write
+isolation. This is distinct from a read-only CLI mount image.
 
 Select Kata explicitly only when the cluster has an eligible node:
 

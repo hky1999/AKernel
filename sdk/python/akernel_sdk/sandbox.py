@@ -25,6 +25,7 @@ from ._addresses import gateway_endpoint_from_env
 from ._backends.base import BackendSession, SandboxSpec, SnapshotRestoreSpec
 from ._backends.registry import load_backend
 from ._dockerfile_launch import DockerfileLaunch
+from ._fork import ForkCleanupError
 from ._sandbox_resources import (
     normalize_xpu,
     validate_storage_limit_mb,
@@ -435,6 +436,97 @@ class Sandbox:
             raise RuntimeError("cannot snapshot a closed sandbox")
         return self._session.create_snapshot(name, timeout)
 
+    def fork(
+        self,
+        count: int = 1,
+        *,
+        idle_timeout: int | None = None,
+        snapshot_timeout: int = 300,
+        restore_timeout: int | None = None,
+    ) -> list[Sandbox | Exception]:
+        """Capture once and derive ``count`` independent running sandboxes.
+
+        Like E2B, return one ordered Sandbox or Exception per requested child;
+        partial failures keep successful siblings. Capture failures raise.
+        The source keeps its identity and lifetime. Children inherit captured
+        resources/policy and rebind this client's cwd, ports, mounts and tunnel.
+        They are owned handles, including when the source is detached.
+
+        ``count`` is 1..20. All timeouts use seconds: ``snapshot_timeout`` bounds
+        capture (1..3600), ``restore_timeout`` bounds each child creation (default
+        source schedule_timeout + 60), and ``idle_timeout`` overrides the source
+        idle timeout for children. No E2B-style absolute lifetime is promised.
+
+        The ADX adapter currently composes snapshot/create/delete requests,
+        creating children sequentially. Temporary snapshot deletion is requested
+        after all attempts; physical collection waits for child references.
+        On deletion failure, ForkCleanupError preserves results and snapshot ID.
+        Unknown create outcomes retain structured operation context and are not
+        blindly replayed. External services and writable host mounts are shared
+        external state; Python handles/streams are not cloned. Quiesce tools
+        before forking and reconnect streams if capture interrupts them.
+        """
+        _validate_integer("count", count, minimum=1)
+        if count > 20:
+            raise ValueError("count must be between 1 and 20")
+        _validate_integer("snapshot_timeout", snapshot_timeout, minimum=1)
+        if snapshot_timeout > 3600:
+            raise ValueError("snapshot_timeout must be between 1 and 3600")
+        if idle_timeout is not None:
+            _validate_integer("idle_timeout", idle_timeout, minimum=0)
+        if restore_timeout is not None:
+            _validate_integer("restore_timeout", restore_timeout, minimum=1)
+        if self._closed or self._session is None:
+            raise RuntimeError("cannot fork a closed sandbox")
+        outcome = self._session.fork(
+            count, idle_timeout, snapshot_timeout, restore_timeout
+        )
+        results: list[Sandbox | Exception] = []
+        cleanup_failures: list[tuple[Sandbox, Exception]] = []
+        try:
+            for child in outcome.results:
+                if isinstance(child, Exception):
+                    results.append(child)
+                    continue
+                try:
+                    results.append(
+                        type(self)._from_session(
+                            child,
+                            reverse_tunnel=self._reverse_tunnel,
+                            ports=sorted(self._forwarded_ports),
+                            detached=False,
+                            cleanup_failures=cleanup_failures,
+                        )
+                    )
+                except Exception as error:
+                    results.append(error)
+        except BaseException:
+            for child in outcome.results:
+                if not isinstance(child, Exception):
+                    try:
+                        child.terminate()
+                    except Exception:
+                        logger.warning(
+                            "failed to clean interrupted fork child %s",
+                            child.id,
+                            exc_info=True,
+                        )
+            raise
+        if outcome.cleanup_error is not None or cleanup_failures:
+            cleanup_error = (
+                outcome.cleanup_error
+                if outcome.cleanup_error is not None
+                else cleanup_failures[0][1]
+            )
+            raise ForkCleanupError(
+                outcome.snapshot_id,
+                results,
+                cleanup_error,
+                pending_sandboxes=tuple(child for child, _ in cleanup_failures),
+                child_cleanup_errors=tuple(error for _, error in cleanup_failures),
+            ) from cleanup_error
+        return results
+
     @classmethod
     def get_snapshot(cls, snapshot_id: str | SnapshotInfo) -> SnapshotInfo:
         """Query catalog metadata by opaque ID, including pending deletion.
@@ -554,10 +646,26 @@ class Sandbox:
             node_id=node_id,
             network_policy=network_policy,
         )
-        # Bypass fresh creation: invoking __init__ would boot a second sandbox
-        # and could repeat Dockerfile/entrypoint side effects.
+        return cls._from_session(
+            load_backend().from_snapshot(spec),
+            reverse_tunnel=reverse_tunnel,
+            ports=ports,
+            detached=detached,
+        )
+
+    @classmethod
+    def _from_session(
+        cls,
+        session: BackendSession,
+        *,
+        reverse_tunnel: HttpReverseTunnel | None,
+        ports: Sequence[int],
+        detached: bool,
+        cleanup_failures: list[tuple[Sandbox, Exception]] | None = None,
+    ) -> Sandbox:
+        # Bypass fresh creation: __init__ would repeat fresh-boot side effects.
         result = cls.__new__(cls)
-        result._session = load_backend().from_snapshot(spec)
+        result._session = session
         result._startup_command = None
         result._pty = None
         result._closed = False
@@ -578,11 +686,15 @@ class Sandbox:
             result._files = Filesystem(result._session.files)
             result._commands = Commands(result._session.commands)
             result._pty = Pty(result._id, driver=result._session.pty)
-        except Exception:
+        except BaseException:
             try:
                 result._session.terminate()
-            except Exception:
-                logger.warning("failed to clean up restored sandbox", exc_info=True)
+            except Exception as error:
+                if cleanup_failures is not None:
+                    cleanup_failures.append((result, error))
+                logger.warning(
+                    "failed to clean up restored sandbox %s", result.id, exc_info=True
+                )
             raise
         return result
 

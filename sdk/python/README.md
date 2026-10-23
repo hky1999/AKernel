@@ -623,6 +623,103 @@ up to 10 seconds within the restore timeout, without recreating the sandbox.
 Initialization failures attempt to delete the known-created clone and preserve
 the original error. See [`examples/snapshots.py`](./examples/snapshots.py).
 
+## Fork a running sandbox
+
+`sandbox.fork(count=N)` captures one reusable memory/filesystem snapshot and
+derives N new running sandboxes. It returns an ordered `list[Sandbox | Exception]`
+with exactly one result per requested child. A child failure does not kill
+successful siblings; a capture failure raises for the whole call. The source
+keeps its ID and configured lifetime and continues after capture.
+
+```python
+from akernel_sdk import ForkCleanupError, Sandbox
+
+children = []
+try:
+    with Sandbox(image="python:3.13-slim-bookworm") as source:
+        source.files.write("/tmp/state", "captured")
+        try:
+            results = source.fork(count=3)
+        except ForkCleanupError as error:
+            # Preserve handles even when resource cleanup was not acknowledged.
+            children.extend(r for r in error.results if isinstance(r, Sandbox))
+            children.extend(error.pending_sandboxes)
+            Sandbox.delete_snapshot(error.snapshot_id)  # idempotent retry
+            raise
+        for result in results:
+            if isinstance(result, Exception):
+                print("child failed:", result)
+            else:
+                children.append(result)
+                print(result.id, result.files.read("/tmp/state"))
+finally:
+    # Production callers should attempt every deletion and retain failed IDs.
+    for child in children:
+        child.kill()
+```
+
+The maintained [`examples/fork.py`](./examples/fork.py) attempts cleanup for all
+known children even when one deletion fails, and preserves workload exceptions.
+
+| Parameter | Meaning |
+| --- | --- |
+| `count=1` | Integer 1..20; booleans are rejected. |
+| `idle_timeout=None` | Child idle timeout in seconds; omitted inherits the source's configured idle timeout. Zero disables idle expiry. |
+| `snapshot_timeout=300` | Capture operation deadline in seconds, 1..3600. |
+| `restore_timeout=None` | Deadline per child creation in seconds; defaults to the source's schedule timeout + 60. |
+
+Children inherit captured resources and the current captured network policy;
+the client's cwd, declared ports, mounts and reverse tunnel are rebound with
+fresh handles. Children are non-detached owned handles even if the source is
+detached. Writes to each child's captured root filesystem and process memory
+are independent. External services and writable HostPath mounts remain shared
+external state. Quiesce model/tool streams before capture, reconnect affected
+connections afterwards, and do not relaunch processes already restored from
+memory. Deleting the source or one child does not delete its siblings.
+
+The count/ordered partial-result convention follows
+[E2B fork](https://docs.e2b.dev/sandbox/fork). Deliberate differences:
+
+- This release provides an instance method, not E2B's additional fork-by-ID
+  class variant. There is no separate all-or-nothing `clone()` operation.
+- The pinned `adx-environment==0.1.0rc2` and AKernel-pinned ADX API have
+  snapshot/create/delete primitives but no native batch fork method/route.
+  The ADX adapter captures once and then creates children **sequentially**;
+  this is multiple requests, not E2B's single server-side fork operation.
+- E2B fork's `timeout` is an absolute child lifetime. AKernel exposes
+  `idle_timeout` and named operation deadlines instead of promising a lifetime
+  its backend does not implement. There is no ambiguous `timeout` alias.
+- Temporary snapshot deletion is requested after all creates settle. Existing
+  children remain alive, and physical collection waits for their references to
+  be released. Deletion failure raises `ForkCleanupError`: `results` retains
+  successful child handles, `snapshot_id` supports retrying deletion, and
+  `cleanup_error` preserves the original error. A failed client binding whose
+  child deletion also fails is retained in `pending_sandboxes`; retry `kill()`.
+  The corresponding failures are in `child_cleanup_errors`.
+
+Unknown capture/create outcomes preserve `BackendOperationError` request and
+environment IDs; the SDK does not initiate an extra logical attempt. An
+unconfirmed create may still exist remotely. Reconcile using those IDs and,
+when appropriate, `ak delete <environment-id>`, rather than deleting unrelated
+resources. Interruption attempts to delete all known children and the temporary
+snapshot; cleanup failures are logged with owned IDs.
+
+Run real isolation, partial-failure and cleanup acceptance on a supporting
+deployment using a complete image that contains Python 3 (not a CLI mount image):
+
+```bash
+AKERNEL_RUN_INTEGRATION=1 \
+AKERNEL_TEST_IMAGE=python:3.13-slim-bookworm \
+PYTHONPATH=sdk/python \
+python sdk/python/tests/integration/test_fork.py
+```
+
+The partial-failure case injects one client-side error before its child create;
+the other two children are real. The cleanup case injects one deletion failure
+and verifies explicit retry. The suite checks real process memory/PID/open-file
+offsets, private writes, source/sibling independence, and snapshot collection.
+It never changes cluster configuration or induces a platform capacity failure.
+
 ## Local failover and reload
 
 `Sandbox(failover=True)` opts into same-node recovery of the same logical

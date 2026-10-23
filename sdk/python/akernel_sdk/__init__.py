@@ -23,6 +23,7 @@ from ._backends.errors import (
     UnsupportedBackendFeatureError,
 )
 from ._backends.registry import selected_backend
+from ._fork import ForkCleanupError
 from ._snapshots import SnapshotPaginator
 from .types import (
     CommandInfo,
@@ -70,6 +71,7 @@ __all__ = [
     "BackendNotInstalledError",
     "UnsupportedBackendFeatureError",
     "BackendOperationError",
+    "ForkCleanupError",
     "DockerContext",
     "DockerfileLaunch",
     "DockerContextEntry",

@@ -43,6 +43,7 @@ from .base import (
     BackendConfig,
     BackendSession,
     Capability,
+    ForkOutcome,
     SandboxSpec,
     SnapshotRestoreSpec,
 )
@@ -469,6 +470,74 @@ class _Session:
         except Exception as error:
             raise _convert_error("create snapshot", error) from error
 
+    def fork(
+        self,
+        count: int,
+        idle_timeout: int | None,
+        snapshot_timeout: int,
+        restore_timeout: int | None,
+    ) -> ForkOutcome:
+        if self._terminated or self._closed:
+            raise BackendOperationError("fork failed: sandbox is closed")
+        # The pinned ADX API has snapshot/create/delete primitives, not a batch
+        # fork route. Capture once and keep the snapshot until all creates settle.
+        snapshot = self.create_snapshot(None, snapshot_timeout)
+        results: list[BackendSession | Exception] = []
+        cleanup_error: Exception | None = None
+        try:
+            spec = SnapshotRestoreSpec(
+                snapshot_id=snapshot.snapshot_id,
+                idle_timeout=(
+                    self._spec.idle_timeout if idle_timeout is None else idle_timeout
+                ),
+                schedule_timeout=self._spec.schedule_timeout,
+                timeout=(
+                    self._spec.schedule_timeout + 60
+                    if restore_timeout is None
+                    else restore_timeout
+                ),
+                name=None,
+                command_cwd=self._spec.command_cwd,
+                port_forwardings=self._spec.port_forwardings,
+                mounts=self._spec.mounts,
+                reverse_tunnel=self._spec.reverse_tunnel,
+                detached=False,
+                failover=self._spec.failover,
+                node_id=None,
+                # Inherit the captured policy, including updates after creation.
+                network_policy=None,
+            )
+            for _ in range(count):
+                try:
+                    results.append(AdxBackend._restore_snapshot(spec, self._connection))
+                except Exception as error:
+                    results.append(error)
+        except BaseException:
+            # No result handles reach the caller on interruption. Release only
+            # children whose identities are known; never touch the source.
+            for child in results:
+                if not isinstance(child, Exception):
+                    try:
+                        child.terminate()
+                    except Exception:
+                        logger.warning(
+                            "failed to clean interrupted fork child %s",
+                            child.id,
+                            exc_info=True,
+                        )
+            raise
+        finally:
+            try:
+                AdxBackend._delete_snapshot(snapshot.snapshot_id, self._connection)
+            except Exception as error:
+                cleanup_error = error
+                logger.warning(
+                    "fork snapshot %s needs explicit cleanup",
+                    snapshot.snapshot_id,
+                    exc_info=True,
+                )
+        return ForkOutcome(snapshot.snapshot_id, results, cleanup_error)
+
     def reload(self) -> bool:
         if self._terminated or self._closed:
             return False
@@ -738,6 +807,10 @@ class AdxBackend:
         return session
 
     def from_snapshot(self, spec: SnapshotRestoreSpec) -> BackendSession:
+        return self._restore_snapshot(spec, self._connection)
+
+    @staticmethod
+    def _restore_snapshot(spec: SnapshotRestoreSpec, connection: Any) -> BackendSession:
         tunnel = spec.reverse_tunnel
         if tunnel is not None and tunnel.reverse_port != tunnel.listen_port - 1:
             raise UnsupportedBackendFeatureError(
@@ -769,11 +842,11 @@ class AdxBackend:
                     tunnel_mode="tls",
                     port_forward_mode="tls",
                 ),
-                connection=self._connection,
+                connection=connection,
             )
         except Exception as error:
             raise _convert_error("restore snapshot", error) from error
-        session = _Session(sandbox, spec, self._connection)
+        session = _Session(sandbox, spec, connection)
         try:
             deadline = min(started + spec.timeout, time.monotonic() + 10)
             while True:
@@ -784,11 +857,18 @@ class AdxBackend:
                     if not _route_read_retryable(error) or time.monotonic() >= deadline:
                         raise
                     time.sleep(min(0.1, max(0, deadline - time.monotonic())))
-        except Exception:
+        except BaseException as error:
             try:
                 session.terminate()
             except Exception:
-                logger.warning("failed to clean up restored sandbox", exc_info=True)
+                if (
+                    isinstance(error, BackendOperationError)
+                    and error.environment_id is None
+                ):
+                    error.environment_id = session.id
+                logger.warning(
+                    "failed to clean up restored sandbox %s", session.id, exc_info=True
+                )
             raise
         return session
 
@@ -822,10 +902,14 @@ class AdxBackend:
             raise _convert_error("list snapshots", error) from error
 
     def delete_snapshot(self, snapshot_id: str) -> None:
+        self._delete_snapshot(snapshot_id, self._connection)
+
+    @staticmethod
+    def _delete_snapshot(snapshot_id: str, connection: Any) -> None:
         try:
             adx_environment.Environment.delete_snapshot(
                 snapshot_id,
-                connection=self._connection,
+                connection=connection,
             )
         except Exception as error:
             if getattr(error, "status_code", None) == 404:
