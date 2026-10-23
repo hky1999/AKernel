@@ -37,7 +37,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PVM_SOURCE_REF: ${{ inputs.source_ref }}
-          PVM_HOST_PROFILE_REF: ${{ inputs.host_profile_ref }}
         run: python3 src/sandboxd/test/e2e/pvm-request.py --kind adx
   pvm-adx:
     needs: request
