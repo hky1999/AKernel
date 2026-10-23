@@ -111,6 +111,9 @@ jobs:
         run: |
           make deploy-script-check
 
+      - name: Check the maintained PVM host profile
+        run: python3 deploy/pvm/test_host_profile.py -v
+
       - name: Test standalone deployment helpers
         run: |
           make deploy-standalone-test

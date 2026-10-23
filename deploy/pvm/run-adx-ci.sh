@@ -4,7 +4,17 @@ set -Eeuo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 out="${PVM_CI_OUTPUT:-${root}/.local/pvm-ci}"
 mkdir -p "${out}"
+export PVM_HOST_PROFILE="${root}/deploy/pvm/host-profile.json"
+source_sha=$(git -C "${root}" rev-parse HEAD)
+[[ -z "${PVM_SOURCE_SHA:-}" || "${PVM_SOURCE_SHA}" == "${source_sha}" ]]
 python3 "${root}/src/sandboxd/test/e2e/pvm-l1.py" > "${out}/l1-before.json"
+cp "${PVM_HOST_PROFILE}" "${out}/expected-host-profile.json"
+cp /opt/akernel-pvm-ci/host-build.json "${out}/host-build.json"
+python3 - "${out}" "${source_sha}" <<'PVM_SOURCE'
+import json,os,sys
+from pathlib import Path
+(Path(sys.argv[1])/'qualification-source.json').write_text(json.dumps({'schema':1,'source_sha':sys.argv[2],'workflow_sha':os.environ.get('GITHUB_SHA'),'repository':os.environ.get('GITHUB_REPOSITORY')},indent=2))
+PVM_SOURCE
 [[ "${EUID}" == 0 && "${DOCKER_HOST:-}" == unix:///run/pvm-ci-docker.sock ]]
 for process in firecracker sandboxd virtiofsd; do
   if pgrep -x "${process}"; then
@@ -12,12 +22,15 @@ for process in firecracker sandboxd virtiofsd; do
     exit 1
   fi
 done
-if [[ ! -d /sys/module/kvm_pvm ]]; then
-  [[ ! -d /sys/module/kvm ]]
-  modprobe irqbypass
-  insmod /opt/akernel-pvm-ci/modules/kvm.ko
-  insmod /opt/akernel-pvm-ci/modules/kvm-pvm.ko
-fi
+[[ ! -d /sys/module/kvm && ! -d /sys/module/kvm_pvm ]] || {
+  echo 'PVM qualification requires an unloaded module pair' >&2; exit 1;
+}
+# Record ownership before the first insmod so failure after loading the core
+# still cleans that owned core, while a rejected pre-existing pair is untouched.
+cp "${out}/l1-before.json" "${out}/module-load-intent.json"
+modprobe irqbypass
+insmod /opt/akernel-pvm-ci/modules/kvm.ko
+insmod /opt/akernel-pvm-ci/modules/kvm-pvm.ko
 python3 "${root}/src/sandboxd/test/e2e/pvm-l1.py" --probe > "${out}/abi.json"
 for module in erofs fuse loop tun br_netfilter ip_tables ip6_tables \
   iptable_filter ip6table_filter iptable_nat ip6table_nat xt_conntrack xt_connmark; do
@@ -31,8 +44,8 @@ fi
 export FIRECRACKER_KERNEL_PROFILE=pvm AKERNEL_TARGETARCH=amd64
 export AKERNEL_ENABLE_KATA=false AKERNEL_ENABLE_FIRECRACKER=true AKERNEL_ENABLE_RUNC=false
 export AKERNEL_BUILD_PROXY=true DOCKER_BUILDKIT=1
-export IMAGE="pvm-ci/all-in-one:${GITHUB_SHA:-local}"
-deploy/scripts/build-image.sh --repository pvm-ci/all-in-one --tag "${GITHUB_SHA:-local}" > "${out}/image-build.log" 2>&1
+export IMAGE="pvm-ci/all-in-one:${source_sha}"
+deploy/scripts/build-image.sh --repository pvm-ci/all-in-one --tag "${source_sha}" > "${out}/image-build.log" 2>&1
 mkdir -p "${out}/payload"
 container=$(docker create --network none --entrypoint /bin/true "$IMAGE")
 for file in manifest.json kernel.config vmlinux initrd.img; do

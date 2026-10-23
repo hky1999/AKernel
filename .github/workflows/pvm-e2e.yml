@@ -1,25 +1,58 @@
 name: PVM Agent DX isolated L1 E2E
 "on":
+  # Register the entry point when it lands on the maintained branch. Only an
+  # explicit maintainer dispatch assigns a disposable privileged runner.
   push:
-    branches: [feat/pvm-candidate-adx]
+    branches: [develop]
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Empty selects the dispatch SHA; otherwise develop or refs/pull/N/head'
+        required: false
+        default: ''
+        type: string
 permissions:
   contents: read
+  pull-requests: read
 concurrency:
   group: pvm-isolated-l1
   cancel-in-progress: false
 jobs:
+  request:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      profile_repository: ${{ steps.resolve.outputs.profile_repository }}
+      profile_sha: ${{ steps.resolve.outputs.profile_sha }}
+      profile_digest: ${{ steps.resolve.outputs.profile_digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Initialize qualification helper from the pinned runtime
+        run: git submodule update --init src/sandboxd
+      - name: Resolve allowed refs to immutable qualification inputs
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PVM_SOURCE_REF: ${{ inputs.source_ref }}
+          PVM_HOST_PROFILE_REF: ${{ inputs.host_profile_ref }}
+        run: python3 src/sandboxd/test/e2e/pvm-request.py --kind adx
   pvm-adx:
-    if: github.repository == 'hky1999/AKernel' && github.ref_name == 'feat/pvm-candidate-adx'
+    needs: request
     runs-on: [self-hosted, linux, x64, pvm-l1-ubuntu7]
     timeout-minutes: 180
     env:
       DOCKER_HOST: unix:///run/pvm-ci-docker.sock
+      PVM_SOURCE_SHA: ${{ needs.request.outputs.source_sha }}
+      PVM_HOST_PROFILE: ${{ github.workspace }}/deploy/pvm/host-profile.json
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          ref: ${{ needs.request.outputs.source_sha }}
           submodules: false
       - name: Initialize pinned sandboxd
         run: |
@@ -52,17 +85,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 src/sandboxd/test/e2e/pvm-l1.py
+          python3 src/sandboxd/test/e2e/pvm-l1.py --boundary-only
           export AKERNEL_STANDALONE_DATA_DIR="/root/pvm-ci/adx-${GITHUB_RUN_ID}"
           if docker inspect akernel-node >/dev/null 2>&1; then
-            test "$(docker inspect --format '{{.Config.Image}}' akernel-node)" = "pvm-ci/all-in-one:${GITHUB_SHA}"
+            test "$(docker inspect --format '{{.Config.Image}}' akernel-node)" = "pvm-ci/all-in-one:${PVM_SOURCE_SHA}"
             bash deploy/standalone/stop.sh
           fi
       - name: Stop owned L1 network fixtures
         if: always()
         run: |
           set -euo pipefail
-          python3 src/sandboxd/test/e2e/pvm-l1.py
+          python3 src/sandboxd/test/e2e/pvm-l1.py --boundary-only
           python3 - <<'PY'
           from pathlib import Path
           import os,signal,subprocess
@@ -81,7 +114,7 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          python3 src/sandboxd/test/e2e/pvm-l1.py
+          python3 src/sandboxd/test/e2e/pvm-l1.py --boundary-only
           python3 - <<'PY'
           import json,os,subprocess
           from pathlib import Path
@@ -114,6 +147,14 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          python3 src/sandboxd/test/e2e/pvm-l1.py
+          python3 src/sandboxd/test/e2e/pvm-l1.py --boundary-only
+          [[ -f "${PVM_CI_OUTPUT}/module-load-intent.json" ]] || exit 0
+          python3 - <<'OWNED_MODULES'
+          import json,os
+          from pathlib import Path
+          intent=json.loads((Path(os.environ['PVM_CI_OUTPUT'])/'module-load-intent.json').read_text())
+          marker=json.loads(Path('/etc/akernel-pvm-ci.json').read_text())
+          assert intent['lab_id']==marker['lab_id']
+          OWNED_MODULES
           if [[ -d /sys/module/kvm_pvm ]]; then rmmod kvm_pvm; fi
           if [[ -d /sys/module/kvm ]]; then rmmod kvm; fi
