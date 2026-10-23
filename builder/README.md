@@ -27,7 +27,11 @@ Nonempty caller overrides take precedence over the preset. These public reposito
 
 Go repository selections are used only during builds; no mirror environment setting is added to the sandbox runtime. Selected APT repository URLs remain in the built images. Mirrors may lag upstream, and failures remain visible instead of automatically switching sources. Docker base-image pulls, GitHub release assets, GitLab source, Cargo packages, NVIDIA repositories use their existing sources. Docker registry mirrors belong to the daemon configuration.
 
-## Pinned release files
+Image builds retry failed APT index refreshes up to five times with increasing delays. Each attempt requires a complete index update and retains repository signature and hash verification. Persistent failures stop the build before package installation.
+
+## Release artifacts
+
+Initialize sandboxd with `git submodule update --init src/sandboxd`; existing checkouts should first run `git submodule sync -- src/sandboxd`. Helm and standalone enable runsc background restore and checkpoint output synchronization. The sandboxd runtime archive manifest supplies the build inputs for gVisor, runc and Firecracker.
 
 Package mirrors do not serve the ADX packages or other release files. For an explicitly selected artifact cache or an unreleased build, the helper accepts these URL/checksum pairs:
 
@@ -45,9 +49,10 @@ Source version/revision labels and artifact URL overrides are declared near thei
 
 ### Environment API source builds
 
-The current AKernel source adapter uses `adx-environment==0.1.0rc1` and
+The current AKernel source adapter uses `adx-environment==0.1.0rc3` and
 `/api/environment/v1`. The Dockerfiles pin the platform and Execd archive
-URLs and SHA-256 values, and `src/agent-dx/` provides the matching source.
+URLs and SHA-256 values. Archive manifests identify the packaged binaries;
+`src/agent-dx/` is a source reference.
 
 Use the matching SDK wheel bundled under `sdk/` in the platform archive for
 source validation when the dependency is not available in your package index:

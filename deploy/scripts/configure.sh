@@ -31,6 +31,13 @@ image_tag_override=""
 install_monitor_override=""
 install_dragonfly_override=""
 chunk_db_size_override=""
+juicefs_enabled="false"
+juicefs_storage_class=""
+juicefs_cache_mib="4096"
+juicefs_cache_host_path=""
+juicefs_cache_large_write="true"
+checkpoint_storage_host_path=""
+checkpoint_storage_existing_claim=""
 enable_runc_override=""
 schedule_placement_policy_override=""
 grafana_public_access_override=""
@@ -122,6 +129,34 @@ while [[ $# -gt 0 ]]; do
       chunk_db_size_override="$2"
       shift 2
       ;;
+    --juicefs-enabled)
+      juicefs_enabled="$2"
+      shift 2
+      ;;
+    --juicefs-storage-class)
+      juicefs_storage_class="$2"
+      shift 2
+      ;;
+    --juicefs-cache-mib)
+      juicefs_cache_mib="$2"
+      shift 2
+      ;;
+    --juicefs-cache-host-path)
+      juicefs_cache_host_path="$2"
+      shift 2
+      ;;
+    --juicefs-cache-large-write)
+      juicefs_cache_large_write="$2"
+      shift 2
+      ;;
+    --checkpoint-storage-host-path)
+      checkpoint_storage_host_path="$2"
+      shift 2
+      ;;
+    --checkpoint-storage-existing-claim)
+      checkpoint_storage_existing_claim="$2"
+      shift 2
+      ;;
     --enable-runc)
       enable_runc_override="$2"
       shift 2
@@ -146,6 +181,14 @@ done
 
 vendor="$(normalize_vendor "${vendor}")"
 require_cmd python3 terraform
+storage_tfvars="$(python3 "${ROOT}/deploy/scripts/shared_storage_config.py" \
+  --juicefs-enabled "${juicefs_enabled}" \
+  --juicefs-storage-class "${juicefs_storage_class}" \
+  --juicefs-cache-mib "${juicefs_cache_mib}" \
+  --juicefs-cache-host-path "${juicefs_cache_host_path}" \
+  --juicefs-cache-large-write "${juicefs_cache_large_write}" \
+  --checkpoint-host-path "${checkpoint_storage_host_path}" \
+  --checkpoint-existing-claim "${checkpoint_storage_existing_claim}")"
 
 prompt() {
   local var_name="$1"
@@ -398,6 +441,7 @@ EOF
     ;;
 esac
 
+printf '\n%s\n' "${storage_tfvars}" >> "${tfvars_file}"
 terraform fmt "${tfvars_file}" >/dev/null
 
 cat > "${config_file}" <<EOF

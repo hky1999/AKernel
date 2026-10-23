@@ -119,6 +119,10 @@ assert text.count(old)==1
 text=text.replace(old,'resolv_conf_path="/home/akernel/sandboxd/config/pvm-ci-resolv.conf"')
 text=text.replace('filestore_dir_size="50G"','filestore_dir_size=""')
 text=text.replace('filestore_xfs_enabled=false','filestore_xfs_enabled=true')
+# OCI and Nydus directory roots require an explicitly selected virtio-fs
+# profile; the maintained standalone default remains EROFS.
+assert text.count('virtiofs_enabled=false')==1
+text=text.replace('virtiofs_enabled=false','virtiofs_enabled=true')
 # This dedicated PVM qualification does not initialize unrelated runtimes.
 text='\n'.join(line for line in text.splitlines() if not line.startswith('runsc='))+'\n'
 p.write_text(text)
@@ -140,7 +144,7 @@ export AKERNEL_TEST_CHECKPOINT_MEMORY_MIB=2048
 python3 - "$out" <<'SETTINGS'
 import json,sys
 from pathlib import Path
-(Path(sys.argv[1])/'qualification-settings.json').write_text(json.dumps({'runtime':'firecracker-pvm','checkpoint_memory_mib':2048,'other_sdk_memory_mib':2048,'checkpoint_snapshot_type':'Full (requested explicitly by ADX)','debugctl_applied':False,'dedicated_pvm_profile':True},indent=2))
+(Path(sys.argv[1])/'qualification-settings.json').write_text(json.dumps({'runtime':'firecracker-pvm','virtiofs_enabled':True,'checkpoint_memory_mib':2048,'other_sdk_memory_mib':2048,'checkpoint_snapshot_type':'Full (requested explicitly by ADX)','debugctl_applied':False,'dedicated_pvm_profile':True},indent=2))
 SETTINGS
 export PYTHONPATH="${root}/sdk/python"
 export AKERNEL_TEST_IMAGE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["oci"])' "$fixtures")

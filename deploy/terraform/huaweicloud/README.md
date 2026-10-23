@@ -151,3 +151,18 @@ make destroy VENDOR=huaweicloud
 The monitor namespace defaults to `akernel-monitor`. If CCE is still
 initializing during the first apply, wait for the cluster and node pool to
 become ready, then rerun `make deploy VENDOR=huaweicloud`.
+
+## Shared checkpoint storage
+
+The `checkpoint_storage` object connects an existing AFS/JuiceFS host mount or
+RWX claim to both execution nodes and Coordinator. Defaults retain local
+checkpoints. Alternatively, `juicefs.enabled=true` deploys PostgreSQL,
+PVC-backed Rook/Ceph RGW, a bucket, the format Job and FUSE mount clients, then
+selects that shared filesystem for ADX. Specify `ceph_storage_class` with raw
+Block support and `postgres_storage_class` with filesystem support.
+
+The guided entry point is `make config JUICEFS_ENABLED=true
+JUICEFS_STORAGE_CLASS=YOUR_STORAGE_CLASS`; use the generated `terraform.tfvars`
+for placement, capacity and separate classes. Review `make plan` before
+deploying. See [the complete storage guide](../../shared-storage/README.md) for
+HA limits, retained data, mount lifecycle, external storage and acceptance.

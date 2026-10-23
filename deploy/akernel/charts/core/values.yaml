@@ -29,6 +29,22 @@ image:
 adx:
   namespace: akernel
   schedulerShards: 1
+  # Execd pushes checkpoint requests and runtime status directly to adxlet.
+  runtimeControl:
+    enabled: true
+    port: 19003
+  # The operator mounts JuiceFS or AFS on every eligible node and Coordinator
+  # host, or provides an existing RWX CSI claim. Credentials stay in that layer.
+  checkpointStorage:
+    kind: local
+    alias: akernel-checkpoints
+    mountPath: /mnt/akernel-shared
+    hostPath: ""
+    existingClaim: ""
+    prefix: akernel/checkpoints
+    # Optional placement shared by execution nodes and Coordinator. Managed
+    # JuiceFS sets this to its client selector so both roles have a host mount.
+    nodeSelector: {}
   tls:
     existingSecret: akernel-adx-tls
   redis:
@@ -107,7 +123,13 @@ node:
     requests:
       ephemeral-storage: 50Gi
   annotations: {}
+  # Operator-managed preparation; see deploy/docs/node-local-directories.md
+  # and deploy/akernel/examples/node-local-directories.yaml. Lists replace on merge.
   initContainers: []
+  directoryHelper:
+    # Package the script for the init-container example without invoking it.
+    # Disabled by default to preserve the node rollout checksum.
+    enabled: false
   hostDiskPath: "/home/akernel"
   homeDisk:
     useEphemeralPVC: false
@@ -457,6 +479,12 @@ node:
         loop_device_dir="/dev"
         overlay_tmpfs_size="10G"
 
+        [plugin.runtime.checkpoint_sync]
+        sync_output=true
+
+        [plugin.runtime.runsc]
+        background_restore=true
+
         [plugin.runtime.basic_spec]
         runsc="/home/akernel/images/config.json"
         runc=""
@@ -469,9 +497,9 @@ node:
         # AKERNEL_RUNTIME_RUNC
 
         [plugin.runtime.firecracker]
-        virtiofs_enabled=true
+        virtiofs_enabled=false
         virtiofsd_path="/usr/local/bin/virtiofsd"
-        writable_io_engine="AsyncDirect"
+        writable_io_engine="Async"
         writable_cache_type="Writeback"
 
         [plugin.runtime.kata]
@@ -500,8 +528,7 @@ node:
         registry_auths_path="/home/akernel/sandboxd/config/registry_auths.json"
         cgroup_memory_limit="64GiB"
 
-        # node-resource config. sock_path matches the sandboxd
-        # external_system_collector reads, so it must stay /var/run/...
+        # Adxlet reads scheduling capacity and devices from this resource socket.
         [plugin.node_resource]
         provider="kubernetes"
         sock_path="/var/run/resource.sock"

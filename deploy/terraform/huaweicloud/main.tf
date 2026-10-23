@@ -93,6 +93,7 @@ locals {
     adx_data_port               = var.adx_data_port
     adx_service_annotations     = merge(local.huaweicloud_adx_elb_annotations, var.adx_service_annotations)
     adx_load_balancer_ip        = var.adx_load_balancer_ip
+    checkpoint_storage          = module.shared_storage.helm_values
     master_image_repository     = var.master_image_repository
     master_image_tag            = var.master_image_tag
     schedule_placement_policy   = var.schedule_placement_policy
@@ -742,6 +743,15 @@ resource "null_resource" "cleanup_orphaned_helm_releases" {
   depends_on = [null_resource.ensure_core_namespace, null_resource.ensure_monitor_namespace]
 }
 
+
+module "shared_storage" {
+  source               = "../shared-storage"
+  management_namespace = var.core_namespace
+  checkpoint_storage   = var.checkpoint_storage
+  juicefs              = var.juicefs
+  depends_on           = [null_resource.ensure_core_namespace]
+}
+
 resource "helm_release" "akernel_core" {
   name             = "akernel-core"
   chart            = "${path.module}/../../akernel/charts/core"
@@ -757,7 +767,7 @@ resource "helm_release" "akernel_core" {
     value = sha256(join("", [for f in fileset("${path.module}/../../akernel/charts/core", "**") : filesha256("${path.module}/../../akernel/charts/core/${f}")]))
   }
 
-  depends_on = [local_sensitive_file.kubeconfig, helm_release.prereq_openkruise, null_resource.ensure_core_namespace, null_resource.ensure_adx_secret, null_resource.ensure_kruise_webhooks_healthy, null_resource.cleanup_orphaned_helm_releases]
+  depends_on = [module.shared_storage, local_sensitive_file.kubeconfig, helm_release.prereq_openkruise, null_resource.ensure_core_namespace, null_resource.ensure_adx_secret, null_resource.ensure_kruise_webhooks_healthy, null_resource.cleanup_orphaned_helm_releases]
 }
 
 resource "helm_release" "akernel_monitor" {

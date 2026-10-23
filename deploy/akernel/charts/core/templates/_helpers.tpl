@@ -5,6 +5,32 @@ Expand the name of the chart.
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{/* Shared filesystem configuration is identical for capture and reclamation. */}}
+{{- define "core.checkpointStorage" -}}
+{{- $storage := .Values.adx.checkpointStorage -}}
+{{- dict "kind" "distributed_fs" "alias" $storage.alias "mount_root" $storage.mountPath "prefix" $storage.prefix | toYaml -}}
+{{- end -}}
+
+{{- define "core.checkpointVolume" -}}
+name: checkpoint-storage
+{{- if .Values.adx.checkpointStorage.existingClaim }}
+persistentVolumeClaim:
+  claimName: {{ .Values.adx.checkpointStorage.existingClaim | quote }}
+{{- else }}
+hostPath:
+  path: {{ .Values.adx.checkpointStorage.hostPath | quote }}
+  type: Directory
+{{- end }}
+{{- end -}}
+
+{{- define "core.checkpointMount" -}}
+name: checkpoint-storage
+mountPath: {{ .Values.adx.checkpointStorage.mountPath | quote }}
+{{- if .Values.adx.checkpointStorage.hostPath }}
+mountPropagation: HostToContainer
+{{- end }}
+{{- end -}}
+
 
 {{/*
 Create a default fully qualified app name.

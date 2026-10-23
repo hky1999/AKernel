@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG AKERNEL_RUNTIME_BASE_IMAGE=ubuntu:24.04
-ARG ADX_VERSION=v0.1.0rc1
-ARG ADX_EXECD_URL=https://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/adx/daily/20261015154014-af7d82f04a52/linux/amd64/adx-execd.tar.gz
-ARG ADX_EXECD_SHA256=62edc1079f5fcb500d25f397bf6c43bc7ff74b885ec8ec386069df138c2c8db1
+ARG ADX_VERSION=v0.1.0rc2
+ARG ADX_EXECD_URL=https://agent-dx.obs.cn-southwest-2.myhuaweicloud.com/adx/daily/20261022184915-6fb53d733181/linux/amd64/adx-execd.tar.gz
+ARG ADX_EXECD_SHA256=47812ee97e842c811c9672e9eee0df0329ba5cd9326d0fc589ce181d83c3ef35
 
 FROM ${AKERNEL_RUNTIME_BASE_IMAGE} AS adx-execd
 ARG ADX_EXECD_URL
@@ -16,8 +16,9 @@ ARG AKERNEL_APT_UBUNTU_MIRROR
 ARG AKERNEL_APT_UBUNTU_PORTS_MIRROR
 RUN --mount=type=bind,source=builder/scripts/configure-apt-mirror.sh,target=/tmp/configure-apt-mirror.sh \
     sh /tmp/configure-apt-mirror.sh
-RUN set -eux; \
-    apt-get update; \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    set -eux; \
+    sh /tmp/apt-get-update.sh; \
     apt-get install -y --no-install-recommends ca-certificates curl; \
     rm -rf /var/lib/apt/lists/*; \
     mkdir -p /opt/adx-execd; \
@@ -40,7 +41,8 @@ ARG AKERNEL_APT_UBUNTU_PORTS_MIRROR
 RUN --mount=type=bind,source=builder/scripts/configure-apt-mirror.sh,target=/tmp/configure-apt-mirror.sh \
     sh /tmp/configure-apt-mirror.sh
 
-RUN apt-get update && \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    sh /tmp/apt-get-update.sh && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         libgcc-s1 \
@@ -66,7 +68,8 @@ ARG AKERNEL_APT_UBUNTU_PORTS_MIRROR
 RUN --mount=type=bind,source=builder/scripts/configure-apt-mirror.sh,target=/tmp/configure-apt-mirror.sh \
     sh /tmp/configure-apt-mirror.sh
 
-RUN apt-get update && \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    sh /tmp/apt-get-update.sh && \
     apt-get install -y --no-install-recommends erofs-utils && \
     rm -rf /var/lib/apt/lists/*
 

@@ -8,6 +8,11 @@ AKernel ships in three deployment modes. Pick the one that matches your target.
 | **Kubernetes (Helm)** | Existing K8s cluster | [`akernel/`](./akernel/) |
 | **Multi-Cloud (Terraform)** | Alibaba Cloud ACK / Huawei Cloud CCE | [`terraform/`](./terraform/) |
 
+For shared checkpoint capture and cross-node restore, see the
+[JuiceFS / AFS deployment guide](shared-storage/README.md). The Helm profile
+uses ADX's `distributed_fs` interface and mounts the same storage in Coordinator
+and nodes. The filesystem clients, PostgreSQL and Ceph remain deployment-owned.
+
 ## Guided deployment
 
 The image installs the complete gVisor bundle pinned by sandboxd's runtime manifest: runsc, the containerd shim, and adjacent `gvisor-bin/` helpers. Its SHA-512 verifies the archive, not a standalone runsc binary. Keep these executables together when building custom images; replacing only runsc can leave mismatched checkpoint/restore helpers.
@@ -28,7 +33,7 @@ make print-env
 make e2e
 ```
 
-The SDK depends on `adx-environment==0.1.0rc1` and uses `/api/environment/v1`.
+The SDK depends on `adx-environment==0.1.0rc3` and uses `/api/environment/v1`.
 The public `akernel_sdk.Sandbox` API retains its existing names. Source
 installs resolve the declared dependency from PyPI.
 See [image build downloads](../builder/README.md#environment-api-source-builds)
@@ -55,19 +60,13 @@ requested runtime, `Sandbox(runtime="kata")` or
 The bundled Firecracker VMM and guest kernel are selected by sandboxd's shared
 runtime manifest, and its guest-agent initrd is built from that same sandboxd
 revision. AKernel also builds pinned virtiofsd 1.14.0 with its release lockfile
-and enables read-only virtio-fs in standalone and Helm. OCI/Nydus image roots
-use the directory provided by the image manager directly, without EROFS
-conversion. The sandbox's writable layer remains a private ext4 image;
-writable host sharing and OCI image mounts are unsupported. EROFS roots and
-mounts remain supported. Set `AKERNEL_ENABLE_FIRECRACKER=false` while building
-to exclude the VMM, kernel, virtiofsd, and initrd.
+and packages it for optional virtio-fs profiles. Standalone and Helm default to EROFS roots with virtio-fs disabled. Compatible profiles can enable OCI/Nydus directory roots, using the image manager's directory directly without EROFS conversion, and explicitly read-only or writable host directory binds. Host backing files remain caller-owned and must be retained for local checkpoint/restore. The sandbox's writable layer remains a private ext4 image; OCI image mounts are unsupported. EROFS roots and mounts remain supported. Set `AKERNEL_ENABLE_FIRECRACKER=false` while building to exclude the VMM, kernel, virtiofsd, and initrd.
 
-The default writable disk policy is `AsyncDirect` with `Writeback`. Hosts must
-provide usable `io_uring` and filesystem alignment queries through
-`statx(STATX_DIOALIGN)` (normally ext4/XFS on Linux 6.1 or newer). Capability
-checks, rather than the kernel version alone, determine compatibility. There
-is no automatic buffered fallback. For older hosts, explicitly configure
-`writable_io_engine="Async"`, or `"Sync"` without io_uring, under
+The default writable disk policy is buffered `Async` with `Writeback`. Hosts
+must provide usable `io_uring`; use an explicit `Sync` policy without it.
+Direct I/O profiles (`AsyncDirect` or `SyncDirect`) additionally require
+filesystem alignment queries through `statx(STATX_DIOALIGN)`.
+There is no automatic policy fallback. Configure the engine under
 `[plugin.runtime.firecracker]` in the standalone config or Helm's
 `node.config.sandboxd.config`. Keep `writable_cache_type="Writeback"`.
 
@@ -75,7 +74,7 @@ Drain sandboxes before replacing the Firecracker stack. Checkpoints record
 VMM, kernel, initrd, and, when used, virtiofsd digests; mismatched stacks are
 rejected on restore. Changing the writable I/O default does not convert the
 engine saved in an existing checkpoint. For the full contract, see the
-[sandbox runtime comparison](https://github.com/inclusionAI/sandboxd/blob/b8f4656c57432bce1b50111e766bcd21510ee482/doc/runtime.md).
+[sandbox runtime comparison](https://github.com/inclusionAI/sandboxd/blob/main/doc/runtime.md).
 
 The native Linux runc backend is opt-in because it uses the host kernel. For a
 guided cloud profile, `make config ENABLE_RUNC=true` records both sides of the
@@ -100,6 +99,26 @@ The all-in-one image, Helm node template, and standalone launcher set
 shared host filesystems read-only during shutdown. Preserve this variable in
 custom launchers. Applying the fix requires replacing the node Pod or
 standalone container; it does not repair an already read-only filesystem.
+
+### Runtime control stream
+
+Helm and the bundled standalone config enable the Execd-to-adxlet control
+stream. Application checkpoint requests notify adxlet immediately and enter the
+Environment's serialized lifecycle queue, without waiting for periodic monitoring.
+Both ADX and the runtime rootfs must contain the matching control-stream release.
+
+Helm advertises the node Pod IP on `adx.runtimeControl.port` (default `19003`).
+Standalone advertises the sandbox bridge gateway `10.88.0.1:19003`; update
+`runtime_control.advertised_address` when using a different bridge. Allow sandboxes
+to reach that node endpoint. The node creates a private, persistent
+`/home/akernel/adx/runtime-control-key`; each execution receives a derived
+credential. Reconnection reports pending state again. Legacy Helm deployments
+can explicitly select HTTP control with `adx.runtimeControl.enabled=false`.
+
+With two or more Ingress replicas, rolling updates replace one old replica at
+a time and keep the others available. This also allows updates when pod
+anti-affinity already occupies every eligible node. A single replica retains
+surge-first updates.
 
 ### Network ACLs
 
@@ -226,6 +245,8 @@ From the repository root, `make standalone` builds the current source and starts
 
 ## 2. Kubernetes (Helm)
 
+For operator-owned sandbox HostPath sources, use [node-local directory preparation](docs/node-local-directories.md) and its supported values overlay.
+
 The umbrella chart in [`akernel/`](./akernel/) deploys AKernel's control
 service, persistent state store, one worker Pod per eligible node, and the
 public ingress. They use the same AKernel all-in-one image.
@@ -239,6 +260,11 @@ The `monitor` subchart remains optional and contains Prometheus, Grafana, Loki,
 and Tempo. Kubernetes nodes must support privileged Pods and the runtime
 requirements described earlier in this guide. Managed Redis requires a default
 StorageClass or an explicit `core.adx.redis.persistence.storageClassName`.
+
+Adxlet reads scheduling capacity and accelerator inventory from sandboxd's
+`/resource` endpoint over `/var/run/resource.sock`. The core chart and both
+cloud deployment profiles enable sandboxd's Kubernetes resource provider;
+keep its socket path aligned with adxlet's `resource_source.socket`.
 
 ### Create the HTTPS and API key Secret
 
@@ -500,7 +526,7 @@ The all-in-one image downloads the static Linux/amd64 distill-fs release pinned 
 
 Publish and verify the distill-fs release before updating the AKernel version, URL, and checksum pin together. Missing or invalid pins stop `make build` before either image is built. There is no source-build fallback.
 
-Validate installation against a downloaded candidate or release with `python3 builder/scripts/test-install-distill-fs.py /path/to/distill-fs-vX.Y.Z-linux-amd64.tar.gz` on Linux/amd64 with curl, jq, and binutils. This checks normal installation and rejects missing/invalid pins, corrupted archives, version/architecture mismatch, binary hash mismatch, and dynamically linked executables. The sandboxd pipeline and gitlink are independent of this dependency.
+Validate installation against a downloaded candidate or release with `python3 builder/scripts/test-install-distill-fs.py /path/to/distill-fs-vX.Y.Z-linux-amd64.tar.gz` on Linux/amd64 with curl, jq, and binutils. This checks normal installation and rejects missing/invalid pins, corrupted archives, version/architecture mismatch, binary hash mismatch, and dynamically linked executables.
 
 ## Shared ChunkDB capacity
 
@@ -511,5 +537,5 @@ Whole bytes and integer `B`, `KiB`, `MiB`, `GiB`, or `TiB` values are supported.
 Resizing an existing cache is unsupported. Same-Pod service restarts retain it; a replacement Pod with a changed hostname clears the image-manager root and creates a new cache with the configured capacity. Drain workloads before replacement. Standalone deployments must stop all users and select a fresh image-manager cache directory when changing capacity. Custom sandboxd configuration templates must retain the `# AKERNEL_CHUNK_DB_SIZE` marker when using the standalone or Helm override.
 
 Internal network mode requires an ADX package containing the optional internal
-transport implementation. The current #71 artifact pin predates it; validate
-with the updated package before deploying these templates.
+transport implementation. Validate control and sandbox traffic with the selected
+package before deploying these templates.

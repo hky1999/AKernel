@@ -34,6 +34,12 @@ spec:
         checksum/otel-collector-config: {{ include (print $.Template.BasePath "/otel-configmap.yaml") . | sha256sum }}
         checksum/adx-config: {{ include (print $.Template.BasePath "/adx/configmap.yaml") . | sha256sum }}
     spec:
+      {{- if eq .Values.adx.checkpointStorage.kind "distributed_fs" }}
+      {{- with .Values.adx.checkpointStorage.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -81,6 +87,9 @@ spec:
           resources:
             {{- toYaml .Values.adx.coordinator.resources | nindent 12 }}
           volumeMounts:
+            {{- if eq .Values.adx.checkpointStorage.kind "distributed_fs" }}
+            - {{ include "core.checkpointMount" . | nindent 14 | trim }}
+            {{- end }}
             {{- if or .Values.monitoring.prometheusEndpoint .Values.monitoring.lokiEndpoint .Values.monitoring.tempoEndpoint }}
             - name: adx-logs
               mountPath: /home/akernel/adx/run/coordinator/logs
@@ -120,6 +129,9 @@ spec:
             - {name: otel-config, mountPath: /etc/otel, readOnly: true}
         {{- end }}
       volumes:
+        {{- if eq .Values.adx.checkpointStorage.kind "distributed_fs" }}
+        - {{ include "core.checkpointVolume" . | nindent 10 | trim }}
+        {{- end }}
         {{- if or .Values.monitoring.prometheusEndpoint .Values.monitoring.lokiEndpoint .Values.monitoring.tempoEndpoint }}
         - name: adx-logs
           emptyDir: {}

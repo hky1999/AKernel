@@ -42,6 +42,12 @@ filestore_xfs_enabled=false
 loop_device_dir="/dev"
 overlay_tmpfs_size="10G"
 
+[plugin.runtime.checkpoint_sync]
+sync_output=true
+
+[plugin.runtime.runsc]
+background_restore=true
+
 [plugin.runtime.basic_spec]
 runsc="/home/akernel/images/config.json"
 runc=""
@@ -54,9 +60,9 @@ firecracker="/usr/local/bin/firecracker"
 # AKERNEL_RUNTIME_RUNC
 
 [plugin.runtime.firecracker]
-virtiofs_enabled=true
+virtiofs_enabled=false
 virtiofsd_path="/usr/local/bin/virtiofsd"
-writable_io_engine="AsyncDirect"
+writable_io_engine="Async"
 writable_cache_type="Writeback"
 
 [plugin.runtime.kata]

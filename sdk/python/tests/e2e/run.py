@@ -94,6 +94,18 @@ CASES = (
         180,
     ),
     Case(
+        "network-tunnel-block",
+        "standalone",
+        (
+            "-m",
+            "unittest",
+            "-v",
+            "tests.e2e.standalone.test_network_features.NetworkFeaturesIntegrationTest.test_reverse_tunnel_with_creation_time_block",
+            "tests.e2e.standalone.test_network_features.NetworkFeaturesIntegrationTest.test_reverse_tunnel_survives_block_clear_and_reblock",
+        ),
+        600,
+    ),
+    Case(
         "network-policy",
         "standalone",
         (

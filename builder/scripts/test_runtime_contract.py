@@ -26,8 +26,10 @@ class RuntimeContractTest(unittest.TestCase):
         self.assertEqual(len(checksums), 1, f"missing or duplicate {prefix}_SHA256 pin")
         self.assertRegex(
             urls[0],
-            rf"^https://openyuanrong\.obs\.cn-southwest-2\.myhuaweicloud\.com/"
-            rf"adx/daily/[0-9]{{14}}-[0-9a-f]{{12}}/linux/amd64/adx-{component}\.tar\.gz$",
+            rf"^https://agent-dx\.obs\.cn-southwest-2\.myhuaweicloud\.com/"
+            rf"adx/(?:daily/[0-9]{{14}}-[0-9a-f]{{12}}|"
+            rf"release/{re.escape(versions[0].removeprefix('v'))})/"
+            rf"linux/amd64/adx-{component}\.tar\.gz$",
         )
         self.assertRegex(checksums[0], r"^[0-9a-f]{64}$")
         self.assertIn(
@@ -75,9 +77,9 @@ class RuntimeContractTest(unittest.TestCase):
         normalized = {item.split("=", 1)[0].lower() for item in requirements}
         self.assertNotIn("openyuanrong-sdk", normalized)
 
-    def test_sdk_uses_the_environment_rc1_dependency(self) -> None:
+    def test_sdk_uses_the_environment_rc3_dependency(self) -> None:
         metadata = tomllib.loads((ROOT / "sdk/python/pyproject.toml").read_text())
-        self.assertIn("adx-environment==0.1.0rc1", metadata["project"]["dependencies"])
+        self.assertIn("adx-environment==0.1.0rc3", metadata["project"]["dependencies"])
 
     def test_actor_backend_sources_are_absent(self) -> None:
         backend = ROOT / "sdk/python/akernel_sdk/_backends"
@@ -124,7 +126,7 @@ class RuntimeContractTest(unittest.TestCase):
             version = re.search(r"(?m)^ARG ADX_VERSION=(.+)$", dockerfile)
             self.assertIsNotNone(version)
             self.assertEqual(dockerfile.count(version[1]), 1)
-            self.assertIn("/adx/daily/", dockerfile)
+            self.assertRegex(dockerfile, r"/adx/(?:daily|release)/")
 
     def test_actor_runtime_entrypoint_is_absent(self) -> None:
         self.assertFalse((ROOT / "builder/scripts/entryfile.sh").exists())
@@ -155,7 +157,7 @@ class RuntimeContractTest(unittest.TestCase):
         runtime = (ROOT / "builder/runtime.Dockerfile").read_text(encoding="utf-8")
         mutations = {
             "mutable URL": re.sub(
-                r"/daily/[^/]+/", "/daily/latest/", node
+                r"/(daily|release)/[^/]+/", r"/\1/latest/", node
             ),
             "missing version": re.sub(
                 r"^ARG ADX_VERSION=.+\n", "", node, flags=re.MULTILINE

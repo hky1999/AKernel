@@ -859,3 +859,86 @@ variable "adx_data_port" {
     error_message = "ADX data port must be an integer between 1 and 65535."
   }
 }
+
+# Shared checkpoints can use a pre-mounted filesystem, an existing RWX claim,
+# or the optional managed JuiceFS/PostgreSQL/Ceph stack below.
+variable "checkpoint_storage" {
+  type = object({
+    kind           = optional(string, "local")
+    alias          = optional(string, "akernel-checkpoints")
+    mount_path     = optional(string, "/mnt/akernel-shared")
+    host_path      = optional(string, "")
+    existing_claim = optional(string, "")
+    prefix         = optional(string, "akernel/checkpoints")
+  })
+  default     = {}
+  nullable    = false
+  description = "ADX checkpoint storage; shared storage is reclaimed by Coordinator."
+  validation {
+    condition = (
+      contains(["local", "distributed_fs"], var.checkpoint_storage.kind) &&
+      (var.checkpoint_storage.kind == "local" || (
+        var.checkpoint_storage.alias != "local" &&
+        can(regex("^[A-Za-z0-9-]+$", var.checkpoint_storage.alias))
+      )) &&
+      can(regex("^(/[A-Za-z0-9_-]+)+$", var.checkpoint_storage.mount_path)) &&
+      can(regex("^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$", var.checkpoint_storage.prefix)) &&
+      alltrue([for path in ["/home/akernel", "/opt/adx", "/etc", "/run", "/var/run", "/proc", "/sys", "/dev"] :
+        var.checkpoint_storage.mount_path != path &&
+        !startswith(var.checkpoint_storage.mount_path, "${path}/") &&
+        !startswith(path, "${var.checkpoint_storage.mount_path}/")
+      ]) &&
+      (var.checkpoint_storage.host_path == "" ||
+        (startswith(var.checkpoint_storage.host_path, "/") && var.checkpoint_storage.host_path != "/" &&
+      !contains(split("/", var.checkpoint_storage.host_path), "..")))
+    )
+    error_message = "Use local or distributed_fs with a safe alias, relative prefix, dedicated absolute mount_path and absolute host_path."
+  }
+}
+
+variable "juicefs" {
+  type = object({
+    enabled                = optional(bool, false)
+    namespace              = optional(string, "akernel-storage")
+    create_namespace       = optional(bool, true)
+    install_rook           = optional(bool, true)
+    host_mount_path        = optional(string, "/srv/akernel-shared")
+    cache_mib              = optional(number, 4096)
+    cache_host_path        = optional(string, "")
+    cache_large_write      = optional(bool, true)
+    gateway_tcp_nodelay    = optional(bool, true)
+    ceph_storage_class     = optional(string, "")
+    postgres_storage_class = optional(string, "")
+    osd_count              = optional(number, 3)
+    osd_size               = optional(string, "100Gi")
+    mon_count              = optional(number, 3)
+    replicas               = optional(number, 3)
+    postgres_size          = optional(string, "10Gi")
+    storage_node_selector  = optional(map(string), {})
+    client_node_selector   = optional(map(string), {})
+    values_files           = optional(list(string), [])
+    rook_values_files      = optional(list(string), [])
+  })
+  default     = {}
+  nullable    = false
+  description = "Optional managed JuiceFS, PostgreSQL and PVC-backed Rook Ceph RGW deployment; enabling it selects distributed_fs checkpoints."
+  validation {
+    condition = (
+      can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", var.juicefs.namespace)) &&
+      length(var.juicefs.namespace) <= 40 &&
+      can(regex("^(/[A-Za-z0-9_-]+)+$", var.juicefs.host_mount_path)) &&
+      alltrue([for path in ["/home/akernel", "/etc", "/run", "/var", "/proc", "/sys", "/dev"] :
+        var.juicefs.host_mount_path != path &&
+        !startswith(var.juicefs.host_mount_path, "${path}/") &&
+        !startswith(path, "${var.juicefs.host_mount_path}/")
+      ]) &&
+      var.juicefs.cache_mib >= 0 && floor(var.juicefs.cache_mib) == var.juicefs.cache_mib &&
+      (var.juicefs.cache_host_path == "" || can(regex("^(/[A-Za-z0-9_-]+)+$", var.juicefs.cache_host_path))) &&
+      var.juicefs.osd_count >= var.juicefs.replicas &&
+      floor(var.juicefs.osd_count) == var.juicefs.osd_count &&
+      var.juicefs.replicas >= 1 && floor(var.juicefs.replicas) == var.juicefs.replicas &&
+      contains([1, 3, 5], var.juicefs.mon_count)
+    )
+    error_message = "JuiceFS requires a safe namespace and host mount path, non-negative integer cache_mib, integer osd_count >= replicas >= 1, and mon_count of 1, 3, or 5."
+  }
+}

@@ -47,6 +47,12 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "core.serviceAccountName" . }}
+      {{- if eq .Values.adx.checkpointStorage.kind "distributed_fs" }}
+      {{- with .Values.adx.checkpointStorage.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- end }}
       {{- with .Values.node.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
@@ -56,6 +62,21 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
+        {{- if eq .Values.adx.checkpointStorage.kind "distributed_fs" }}
+        - name: prepare-checkpoint-storage
+          image: "{{ include "core.image" (dict "root" . "image" .Values.node.image) }}"
+          imagePullPolicy: {{ include "core.image.pullPolicy" (dict "root" . "image" .Values.node.image) }}
+          command: [python3, /config/prepare_checkpoint_storage.py]
+          args:
+            - --config
+            - /config/sandboxd_config.toml
+            - --mount-root
+            - {{ .Values.adx.checkpointStorage.mountPath | quote }}
+          volumeMounts:
+            - {{ include "core.checkpointMount" . | nindent 14 | trim }}
+            - {name: akernel-node-config, mountPath: /config, readOnly: true}
+            - {name: home-disk, mountPath: /home/akernel, readOnly: true}
+        {{- end }}
         - name: migrate-adx-state
           image: "{{ include "core.image" (dict "root" . "image" .Values.node.image) }}"
           imagePullPolicy: {{ include "core.image.pullPolicy" (dict "root" . "image" .Values.node.image) }}
@@ -196,6 +217,9 @@ spec:
         - mountPath: /home/akernel/sandboxd/config.toml
           name: akernel-node-config
           subPath: sandboxd_config.toml
+        {{- if eq .Values.adx.checkpointStorage.kind "distributed_fs" }}
+        - {{ include "core.checkpointMount" . | nindent 10 | trim }}
+        {{- end }}
         - mountPath: /home/akernel
           name: home-disk
           {{- if not .Values.node.homeDisk.useEphemeralPVC }}
@@ -220,6 +244,9 @@ spec:
       tolerations:
       - operator: "Exists"
       volumes:
+      {{- if eq .Values.adx.checkpointStorage.kind "distributed_fs" }}
+      - {{ include "core.checkpointVolume" . | nindent 8 | trim }}
+      {{- end }}
       - name: akernel-secrets
         secret:
           secretName: akernel-secrets

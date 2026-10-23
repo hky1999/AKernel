@@ -30,22 +30,32 @@ PTYs, port forwarding, and reverse tunnels.
 
 AKernel SDK requires Python 3.10 or newer.
 
+Install the stable SDK from PyPI:
+
 ```bash
-pip install akernel-sdk
+python -m pip install akernel-sdk
 ```
 
-To install from source:
+To include published release candidates:
+
+```bash
+python -m pip install --pre akernel-sdk
+```
+
+Choose an SDK version compatible with the deployed backend and pin its exact
+published version for reproducible installations. For an unpublished source
+revision, install from the repository root:
 
 ```bash
 python -m pip install ./sdk/python
 ```
 
-This source version depends on `adx-environment==0.1.0rc1`, maintained in
-`pyproject.toml`. The ADX adapter translates the public AKernel `Sandbox` API
+The SDK's ADX dependency is declared in `pyproject.toml`.
+The ADX adapter translates the public AKernel `Sandbox` API
 to `adx_environment.Environment`. Deploy a matching ADX release exposing
 `/api/environment/v1` for lifecycle, resources and command subscriptions.
 
-Source installs and CI resolve `adx-environment==0.1.0rc1` from PyPI.
+Source installs and CI resolve the declared ADX dependency from the package index.
 CI checks AKernel wheel and source distribution installs in separate clean
 environments, including `pip check`, imports, version checks, and the `ak` CLI.
 
@@ -367,10 +377,11 @@ prerequisites are available.
 Kata and Firecracker require at least one cluster node whose sandboxd instance
 successfully initialized the requested runtime with a usable `/dev/kvm`
 device. Nodes without KVM remain available for runsc workloads and do not
-advertise either VM runtime. The bundled Firecracker configuration enables
-read-only virtio-fs for OCI/Nydus image roots and read-only host directories,
-while retaining EROFS image roots and mounts. OCI image mounts, writable host
-binds, GPUs, and nested KVM remain unsupported.
+advertise either VM runtime. The bundled Firecracker configuration disables
+virtio-fs and uses EROFS image roots and mounts. OCI/Nydus image roots and
+HostPath directories require an operator-enabled compatible virtio-fs profile;
+see [enabling Firecracker directory access](#enabling-firecracker-directory-access).
+OCI image mounts, GPUs, and nested KVM remain unsupported.
 
 The all-in-one image can optionally package a native Linux `runc` backend.
 Operators build it with `AKERNEL_ENABLE_RUNC=true` and enable it explicitly
@@ -592,6 +603,14 @@ ports. Its frontend derives the WebSocket port from the HTTP listener, so
 that sandbox while the tunnel is active and must not also appear in
 `port_forwardings`; they do not occupy ports on the SDK host.
 
+Replacing a network policy can interrupt the existing tunnel connection. After
+acknowledgement, the SDK that owns the tunnel actively retires its old transport
+and reuses its reconnect loop, keeping the session and resumable requests.
+Return from `update_network_policy()` confirms policy installation; tunnel
+readiness may follow, so retry requests during recovery. Updates through another
+client or raw HTTP use the existing heartbeat fallback (20-second interval and
+10-second pong timeout by default).
+
 ## Rootfs and mounts
 
 Use a public OCI image:
@@ -654,15 +673,37 @@ runtime inside an S3 object. When neither source is supplied, AKernel sends
 only the selected isolation runtime and openYuanRong overlays it onto the
 rootfs configured by the deployed service.
 
-Firecracker supports `Sandbox(runtime="firecracker", image="ubuntu:24.04")`
-with the bundled virtio-fs configuration. Both OCI and Nydus roots use the
-image manager's directory directly, without conversion to EROFS. The shared
-root stays read-only; sandbox writes use its private ext4 overlay. The deployed
-default and explicit `rootfs` S3 objects continue to use raw EROFS images.
-The bundled distill-fs supports Nydus RAFS v5. When preparing Nydus images with
-`nydusify convert`, select `--fs-version 5` explicitly.
-Custom deployments must enable `plugin.runtime.firecracker.virtiofs_enabled`
-and install the matching Firecracker stack and virtiofsd.
+The default Firecracker profile uses the deployed EROFS root when `image`
+and `rootfs` are omitted; explicit `rootfs` S3 objects must contain raw EROFS
+images. `Sandbox(runtime="firecracker", image="ubuntu:24.04")` requires the
+operator-enabled virtio-fs profile described below. With that profile, OCI and
+Nydus roots use the image manager's directory directly. The shared root stays
+read-only; sandbox writes use its private node-local ext4 overlay. The bundled
+distill-fs supports Nydus RAFS v5; select `--fs-version 5` when preparing images
+with `nydusify convert`.
+
+### Enabling Firecracker directory access
+
+This is a node deployment setting, not an SDK `extra_config` option. Helm and
+standalone keep `plugin.runtime.firecracker.virtiofs_enabled=false` by default.
+Operators who need OCI/Nydus roots or HostPath directories must:
+
+1. Qualify a KVM-capable image containing the compatible Firecracker VMM,
+   guest kernel/agent and virtiofsd. Include the Firecracker build payload.
+2. Drain existing Firecracker sandboxes before changing the runtime profile.
+   Recreate recovery points when the rootfs or mount layout changes.
+3. In Helm, update the `[plugin.runtime.firecracker]` section of
+   `node.config.sandboxd.config` to `virtiofs_enabled=true` (`core.node...` in
+   the umbrella chart), preserving the rest of the TOML configuration. For
+   standalone, update the same section in the sandboxd configuration used by
+   the launcher. Restart the drained node services with the updated profile.
+4. Verify a fresh Sandbox using the required root or HostPath directory,
+   including permissions, private writes and checkpoint/reload, before
+   admitting workloads. Keep runtime state and private writable layers on
+   node-local disk, separate from shared checkpoints.
+
+An incompatible runtime or filesystem profile requires new recovery points;
+do not restore old checkpoints across that migration.
 
 The same `S3Config` type can be used as a read-only mount source:
 
@@ -680,8 +721,64 @@ OCI images can also be mounted read-only:
 mount = Mount(target="/opt/tools", image_url="ubuntu:24.04")
 ```
 
-Firecracker mounts must instead use `type="erofs"` with an S3 object containing
-a raw EROFS image; it rejects `image_url` and directory-backed mounts.
+Firecracker S3 mounts use `type="erofs"` with a raw EROFS image. It rejects
+`image_url` mounts. HostPath directories require the enabled virtio-fs profile
+above; the default profile rejects them.
+
+### Node HostPath bind mounts
+
+Trusted management clients can bind an existing node-visible path into a
+sandbox. For example, expose a prepared log directory on a selected runsc node:
+
+```python
+from akernel_sdk import Mount, Sandbox
+
+logs = Mount(
+    target="/apps/logs",       # Path inside the sandbox.
+    host_path="/apps/logs",    # Path visible to sandboxd on the selected node.
+    read_only=False,           # Explicitly allow application log writes.
+)
+with Sandbox(node_id="<prepared-node-id>", mounts=[logs]) as sandbox:
+    print(sandbox.commands.run("ls -ld /apps/logs").stdout)
+```
+
+`read_only=True` is the default. HostPath supports `type="bind"` only;
+`read_only=False` is rejected for Image/S3 mounts, which remain read-only.
+Exactly one of `image_url`, `s3_config`, or `host_path` is required. The source
+must be an absolute POSIX path without traversal components or control
+characters. The SDK does not inspect the client machine's filesystem or create
+the source directory; it sends `create_if_missing=false`. An absent source or
+insufficient filesystem permissions is a node-side error.
+
+In Kubernetes, the node Pod must first see the source, for example through an
+operator-managed `hostPath` volume and matching `volumeMount`. An ECS directory
+does not become visible to sandboxd merely because its path is in the SDK
+request. Directory ownership and permissions must allow the sandbox's process
+UID/GID to use it. Separate workers' local directories are separate data;
+`node_id` selects the prepared node but does not replicate storage. Data written
+through a bind can outlive the sandbox. Runtime-specific mount restrictions
+are enforced by the deployed backend. Firecracker HostPath directories,
+including read-only directories, require the operator-enabled virtio-fs profile.
+Read-only regular-file injection can use the default Firecracker profile;
+writable regular-file mounts are unsupported.
+
+For operator-managed Kubernetes preparation and the retention/C/R contract, see
+[node-local application directories](../../deploy/docs/node-local-directories.md).
+
+Restrict HostPath creation to trusted management clients and source paths
+controlled by the operator. These mounts do not provide per-tenant source-path
+isolation; SDK path validation and read-only defaults do not authorize access
+to the node's filesystem. Server permission errors are returned through the
+normal `BackendOperationError` fields.
+
+The maintained example requires an explicit node and source. It lists the
+read-only mount by default; `--write` creates one uniquely named log file and
+leaves that file on the node:
+
+```bash
+python sdk/python/examples/hostpath_mounts.py \
+  --node-id <prepared-node-id> --host-path /apps/logs --write
+```
 
 ## Launch from a Dockerfile
 
@@ -798,6 +895,7 @@ Maintained examples are under [`examples/`](./examples):
 - `dockerfile_launch.py`
 - `failover_reload.py`
 - `gpu_sandbox.py`
+- `hostpath_mounts.py`
 - `named_sandbox.py`
 - `network_policy.py`
 - `pty.py`
@@ -822,8 +920,9 @@ PYTHONPATH=sdk/python \
 ```
 
 Set `AKERNEL_TEST_RUNTIME=firecracker` or `firecracker-pvm` and
-`AKERNEL_TEST_IMAGE=ubuntu:24.04` to exercise the same suite, including
-checkpoint/reload, against a virtio-fs image root. `AKERNEL_TEST_IMAGE` also
+`AKERNEL_TEST_IMAGE=ubuntu:24.04` after explicitly enabling a compatible
+virtio-fs profile on the test node to exercise the same suite, including
+checkpoint/reload, against a directory image root. `AKERNEL_TEST_IMAGE` also
 accepts a Nydus image reference and enables checks for private writes and
 network policy replacement. Use immutable digest references when qualifying a
 runtime release, and run both OCI and Nydus images. The pinned distill-fs
@@ -850,7 +949,7 @@ not part of the default test suite.
 | `SandboxInfo` | `id`, `state`, `cpu`, `memory`, `image`, `xpu`, `storage_mb` |
 | `NodeInfo` | `id`, `status`, `capacity`, `allocatable`, `labels` |
 | `S3Config` | `endpoint`, `bucket`, `object`, optional credentials |
-| `Mount` | `target`, one source, and `type` |
+| `Mount` | `target`, exactly one of `image_url` / `s3_config` / `host_path`, `type`, `read_only` (default `True`; writable only for HostPath) |
 | `HttpReverseTunnel` | `target`, `reverse_port`, `listen_port`, `connect_timeout` |
 | `PortRange` | `first`, `last` |
 | `NetworkRule` | action, direction, protocol, peer and sandbox port selectors, priority |
@@ -862,3 +961,32 @@ not part of the default test suite.
 | `DockerContext` | Abstract Dockerfile and build-context source |
 | `DockerContextEntry` | `path`, `kind`, `mode` |
 | `LocalDockerContext` | Local Dockerfile and context implementation |
+
+## Backend errors
+
+`BackendOperationError` preserves optional service context directly on the
+public exception: `code`, `retry`, `outcome`, `request_id`, `operation_id`,
+`environment_id`, `status_code`, `scheduling_failure`, `failure`,
+`probe_failure`, and `request_forwarded`. Fields absent from the backend response
+are `None`; the original exception remains in `__cause__`.
+
+```python
+from akernel_sdk import BackendOperationError, Sandbox
+
+try:
+    sandbox = Sandbox(cpu=1000, memory=2048)
+except BackendOperationError as error:
+    print(error.code, error.retry, error.outcome, error.request_id)
+    print(error.scheduling_failure)
+else:
+    sandbox.kill()
+```
+
+A service-confirmed cancelled scheduling request uses `outcome="not_started"`
+and `retry="never"`: the configured queue wait has finished. Capacity and
+placement details are available in `scheduling_failure` when supported by the
+server and ADX SDK. An older backend can omit those details. Ambiguous execution
+results retain `outcome="unknown"` and `retry="same_operation"`; preserve the
+original identity when querying or retrying. Do not infer execution or cleanup
+from a timeout message. `status_code` describes the service failure (including
+an SSE final event's error code); it need not equal the stream's HTTP status.

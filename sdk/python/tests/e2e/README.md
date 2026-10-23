@@ -6,7 +6,7 @@ E2E directories separate deployment requirements:
 | Level | Environment | Groups |
 | --- | --- | --- |
 | L0 | One ready node; fast public SDK smoke | `sdk-contracts` |
-| Standalone | One Linux node, configured runtime and reachable image fixtures | `direct-ingress`, `lifecycle`, `auth`, `cli-contract`, `io`, `pty-close`, `network-url`, `network-tunnel`, `network-policy`, `runtime-integration`, `storage-quota`, `network-policy-matrix` |
+| Standalone | One Linux node, configured runtime and reachable image fixtures | `direct-ingress`, `lifecycle`, `auth`, `cli-contract`, `io`, `pty-close`, `network-url`, `network-tunnel`, `network-tunnel-block`, `network-policy`, `runtime-integration`, `storage-quota`, `network-policy-matrix` |
 | Multi-VM | At least two registered workers | `node-placement` |
 | Full | Multi-worker deployment with storage/device/admin/fault fixtures as selected | `redis-lifecycle`, `placement-affinity`, `admission`, `concurrent-claim`, `unknown-create-result`, `create-transport-disconnect`, `custom-image`, `dockerfile`, `port-forward`, `storage-sources`, `tenant-isolation`, `key-lifecycle`, `scheduler-admin`, `scheduler-maintenance`, `fault-runc-delete-retry`, `fault-process-restart`, `fault-node-loss`, `fault-checkpoint-shared`, `fault-checkpoint-local` |
 
@@ -62,6 +62,15 @@ PR CI includes this group through standalone discovery.
 withdrawal after deletion. Its Host-header case additionally requires
 `AKERNEL_TEST_PORT_HOST_DOMAIN` to match the configured ADX port-host domain;
 it does not configure public wildcard DNS or certificates.
+
+The `network-tunnel-block` standalone group covers default WS/HTTP 8765/8766 and
+custom 18765/18766 listeners with creation-time `NetworkPolicy.block()` and live
+block/clear/reblock transitions, including consecutive updates before waiting
+for tunnel recovery. It uses the same public tunnel handle throughout and
+requires each probe to recover within 10 seconds after a policy replacement.
+It also checks command/file/PTY/published-port access under block and verifies
+that a bounded ordinary outbound TCP attempt is denied. Normal standalone
+inventory and teardown audits apply to these cases too.
 
 ## Fixture requirements
 

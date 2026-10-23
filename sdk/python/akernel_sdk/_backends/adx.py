@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import adx_environment
@@ -29,6 +30,7 @@ from ..types import (
     DNSPolicy,
     DNSRule,
     EntryInfo,
+    Mount,
     NetworkPolicy,
     NetworkRule,
     PortRange,
@@ -47,6 +49,60 @@ from .errors import BackendOperationError, UnsupportedBackendFeatureError
 _NAMESPACE = "default"
 _DEFAULT_LISTEN_PORT = 8766
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _NativeHostPathMount(adx_environment.Mount):
+    """Adapt node HostPath sources through the pinned native Mount serializer.
+
+    The pinned native SDK checks isinstance(Mount) before calling to_dict, but
+    its stock value type only represents Image/S3. Keep that constructor and
+    transport intact without replacing native classes or mutating global state.
+    """
+
+    host_path: str = ""
+    read_only: bool = True
+
+    def __post_init__(self) -> None:
+        self._public_mount()
+
+    def _public_mount(self) -> Mount:
+        if self.image_url is not None or self.s3_config is not None:
+            raise ValueError("HostPath adapter requires only a host_path source")
+        return Mount(
+            target=self.target,
+            type=self.type,
+            host_path=self.host_path,
+            read_only=self.read_only,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return self._public_mount().to_dict()
+
+
+def _native_mount(mount: Mount) -> Any:
+    if mount.host_path is not None:
+        return _NativeHostPathMount(
+            target=mount.target,
+            host_path=mount.host_path,
+            read_only=mount.read_only,
+        )
+    return adx_environment.Mount(
+        target=mount.target,
+        image_url=mount.image_url,
+        s3_config=(
+            adx_environment.S3Config(
+                endpoint=mount.s3_config.endpoint,
+                bucket=mount.s3_config.bucket,
+                object=mount.s3_config.object,
+                access_key=mount.s3_config.access_key,
+                secret_key=mount.s3_config.secret_key,
+            )
+            if mount.s3_config is not None
+            else None
+        ),
+        type=mount.type,
+    )
 
 
 def _control_pty_connection(connection: Any) -> Any:
@@ -115,7 +171,20 @@ def _native_network_policy(policy: NetworkPolicy) -> Any:
 
 
 def _convert_error(operation: str, error: Exception) -> BackendOperationError:
-    return BackendOperationError(f"{operation} failed: {error}")
+    return BackendOperationError(
+        f"{operation} failed: {error}",
+        code=getattr(error, "code", None),
+        retry=getattr(error, "retry", None),
+        outcome=getattr(error, "outcome", None),
+        request_id=getattr(error, "request_id", None),
+        operation_id=getattr(error, "operation_id", None),
+        environment_id=getattr(error, "environment_id", None),
+        status_code=getattr(error, "status_code", None),
+        scheduling_failure=getattr(error, "scheduling_failure", None),
+        failure=getattr(error, "failure", None),
+        probe_failure=getattr(error, "probe_failure", None),
+        request_forwarded=getattr(error, "request_forwarded", None),
+    )
 
 
 def _route_read_retryable(error: Exception) -> bool:
@@ -546,25 +615,7 @@ class AdxBackend:
         network = None
         if spec.network_policy is not None:
             network = _native_network_policy(spec.network_policy)
-        mounts = [
-            adx_environment.Mount(
-                target=mount.target,
-                image_url=mount.image_url,
-                s3_config=(
-                    adx_environment.S3Config(
-                        endpoint=mount.s3_config.endpoint,
-                        bucket=mount.s3_config.bucket,
-                        object=mount.s3_config.object,
-                        access_key=mount.s3_config.access_key,
-                        secret_key=mount.s3_config.secret_key,
-                    )
-                    if mount.s3_config is not None
-                    else None
-                ),
-                type=mount.type,
-            )
-            for mount in spec.mounts
-        ]
+        mounts = [_native_mount(mount) for mount in spec.mounts]
         create_timeout = spec.schedule_timeout + 60
         create_args = dict(
             image=spec.image,

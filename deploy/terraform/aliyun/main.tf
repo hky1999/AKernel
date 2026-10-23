@@ -141,6 +141,7 @@ locals {
     adx_data_port               = var.adx_data_port
     adx_service_annotations     = local.effective_adx_service_annotations
     adx_load_balancer_ip        = var.adx_load_balancer_ip
+    checkpoint_storage          = module.shared_storage.helm_values
     acr_registry                = local.acr_registry
     acr_secret_enabled          = local.acr_secret_enabled
     acr_host                    = local.acr_host
@@ -778,6 +779,15 @@ resource "helm_release" "prereq_openkruise" {
   depends_on = [data.alicloud_cs_cluster_credential.ack, alicloud_cs_kubernetes_node_pool.default_with_key, alicloud_cs_kubernetes_node_pool.default_with_password, null_resource.ensure_prereq_namespace]
 }
 
+
+module "shared_storage" {
+  source               = "../shared-storage"
+  management_namespace = var.core_namespace
+  checkpoint_storage   = var.checkpoint_storage
+  juicefs              = var.juicefs
+  depends_on           = [null_resource.ensure_core_namespace]
+}
+
 resource "helm_release" "akernel_core" {
   name                       = "akernel-core"
   chart                      = "${path.module}/../../akernel/charts/core"
@@ -794,7 +804,7 @@ resource "helm_release" "akernel_core" {
     value = sha256(join("", [for f in fileset("${path.module}/../../akernel/charts/core", "**") : filesha256("${path.module}/../../akernel/charts/core/${f}")]))
   }
 
-  depends_on = [data.alicloud_cs_cluster_credential.ack, helm_release.prereq_openkruise, null_resource.ensure_core_namespace, null_resource.ensure_adx_secret, null_resource.create_storage_class]
+  depends_on = [module.shared_storage, data.alicloud_cs_cluster_credential.ack, helm_release.prereq_openkruise, null_resource.ensure_core_namespace, null_resource.ensure_adx_secret, null_resource.create_storage_class]
 }
 
 resource "helm_release" "akernel_monitor" {

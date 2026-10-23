@@ -15,6 +15,10 @@ service_overrides:
       metrics_listen: 127.0.0.1:19091
       runtime_logs:
         directory: /home/akernel/adx/run/node/logs/runtime
+      runtime_control:
+        listen: 0.0.0.0:19003
+        advertised_address: http://10.88.0.1:19003
+        key_file: /home/akernel/adx/runtime-control-key
       execd_env:
         ADX_EXECD_CONTROL_SOCKET_PATH: /run/akernel
       resource_source:

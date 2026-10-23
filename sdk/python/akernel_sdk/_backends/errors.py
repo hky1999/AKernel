@@ -14,6 +14,8 @@
 
 """Stable errors raised at the AKernel backend boundary."""
 
+from typing import Any
+
 
 class InvalidBackendError(ValueError):
     """The configured backend identifier is not supported."""
@@ -28,4 +30,38 @@ class UnsupportedBackendFeatureError(ValueError):
 
 
 class BackendOperationError(RuntimeError):
-    """A backend operation failed."""
+    """A backend operation failed, with optional service error context.
+
+    Missing fields are ``None``. ``retry`` and ``outcome`` retain the service's
+    instructions; callers must not infer execution state from the message or
+    an HTTP status. The original backend error remains available as the cause.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        retry: str | None = None,
+        outcome: str | None = None,
+        request_id: str | None = None,
+        operation_id: str | None = None,
+        environment_id: str | None = None,
+        status_code: int | None = None,
+        scheduling_failure: dict[str, Any] | None = None,
+        failure: dict[str, Any] | None = None,
+        probe_failure: dict[str, Any] | None = None,
+        request_forwarded: bool | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retry = retry
+        self.outcome = outcome
+        self.request_id = request_id
+        self.operation_id = operation_id
+        self.environment_id = environment_id
+        self.status_code = status_code
+        self.scheduling_failure = scheduling_failure
+        self.failure = failure
+        self.probe_failure = probe_failure
+        self.request_forwarded = request_forwarded

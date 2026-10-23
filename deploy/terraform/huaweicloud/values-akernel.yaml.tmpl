@@ -10,6 +10,7 @@ monitoring:
 %{ endif ~}
 
 adx:
+  checkpointStorage: ${jsonencode(checkpoint_storage)}
   tls:
     existingSecret: akernel-adx-tls
   redis:
@@ -188,7 +189,7 @@ node:
         registry_auths_path="/home/akernel/sandboxd/config/registry_auths.json"
         cgroup_memory_limit="64GiB"
 
-        # Node resource reports consumed by the control-plane collector.
+        # Adxlet reads scheduling capacity and devices from this resource socket.
         [plugin.node_resource]
         provider="kubernetes"
         sock_path="/var/run/resource.sock"

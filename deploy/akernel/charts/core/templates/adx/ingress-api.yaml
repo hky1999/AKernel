@@ -21,6 +21,12 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.adx.ingressApi.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Multiple replicas can occupy every eligible node under anti-affinity.
+      maxSurge: {{ ge (int .Values.adx.ingressApi.replicas) 2 | ternary 0 1 }}
+      maxUnavailable: {{ ge (int .Values.adx.ingressApi.replicas) 2 | ternary 1 0 }}
   selector:
     matchLabels:
       app: akernel-adx-ingress-api

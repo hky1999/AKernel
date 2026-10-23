@@ -1,0 +1,37 @@
+imagePullSecrets: []
+readiness:
+  image: docker.io/library/python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70
+  timeoutSeconds: 900
+juicefs:
+  image: docker.io/juicedata/mount:ce-v1.4.1@sha256:ab99388a397fe52575fdeb84a9e017c3c594a6b07d63966cd4805bbf6f172673
+  volumeName: akernel-checkpoints
+  hostMountPath: /srv/akernel-shared
+  blockSizeKiB: 1024
+  trashDays: 0
+  cacheMiB: 4096
+  # Empty selects /var/cache/<namespace>/<release>/juicefs on each host.
+  cacheHostPath: ""
+  cacheLargeWrite: true
+  writeback: false
+  readaheadMiB: 4
+  nodeSelector: {kubernetes.io/os: linux}
+ceph:
+  image: quay.io/ceph/ceph@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9
+  storageClass: ""
+  # Empty selects /var/lib/<storage-namespace>/rook on each storage host.
+  dataDirHostPath: ""
+  osdCount: 3
+  osdSize: 100Gi
+  monCount: 3
+  monSize: 10Gi
+  replicas: 3
+  gatewayInstances: 2
+  gatewayTcpNoDelay: true
+  nodeSelector: {kubernetes.io/arch: amd64}
+postgres:
+  image: docker.io/library/postgres:17-bookworm@sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652
+  storageClass: ""
+  size: 10Gi
+  # An existing Secret must contain a password key. Generated credentials and
+  # the metadata PVC are retained on uninstall and reused during upgrades.
+  existingSecret: ""

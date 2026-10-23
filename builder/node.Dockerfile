@@ -37,9 +37,9 @@ ARG OTELCOL_CONTRIB_URL=
 ARG OTELCOL_CONTRIB_SHA256=
 ARG AKERNEL_VERSION=unknown
 ARG AKERNEL_REVISION=unknown
-ARG ADX_VERSION=v0.1.0rc1
-ARG ADX_RELEASE_URL=https://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/adx/daily/20261015154014-af7d82f04a52/linux/amd64/adx-release.tar.gz
-ARG ADX_RELEASE_SHA256=84f2cc11dca67aed642f4908c0e74ba1978d272491e239adad2ad03ba302da77
+ARG ADX_VERSION=v0.1.0rc2
+ARG ADX_RELEASE_URL=https://agent-dx.obs.cn-southwest-2.myhuaweicloud.com/adx/daily/20261022184915-6fb53d733181/linux/amd64/adx-release.tar.gz
+ARG ADX_RELEASE_SHA256=664c4a7344ca7cf9b9fedefc7f010ae775c35b89148b068ab2dfa532b150b566
 
 FROM ${AKERNEL_NODE_BASE_IMAGE} AS adx-release
 ARG ADX_RELEASE_URL
@@ -48,8 +48,9 @@ ARG AKERNEL_APT_UBUNTU_MIRROR
 ARG AKERNEL_APT_UBUNTU_PORTS_MIRROR
 RUN --mount=type=bind,source=builder/scripts/configure-apt-mirror.sh,target=/tmp/configure-apt-mirror.sh \
     sh /tmp/configure-apt-mirror.sh
-RUN set -eux; \
-    apt-get update; \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    set -eux; \
+    sh /tmp/apt-get-update.sh; \
     apt-get install -y --no-install-recommends ca-certificates curl python3; \
     rm -rf /var/lib/apt/lists/*; \
     mkdir -p /tmp/adx-release; \
@@ -72,7 +73,8 @@ ARG AKERNEL_APT_UBUNTU_PORTS_MIRROR
 RUN --mount=type=bind,source=builder/scripts/configure-apt-mirror.sh,target=/tmp/configure-apt-mirror.sh \
     sh /tmp/configure-apt-mirror.sh
 
-RUN set -eux; \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    set -eux; \
     case "${TARGETARCH:-}" in \
       amd64|arm64) ;; \
       *) echo "unsupported gVisor target architecture: ${TARGETARCH}" >&2; \
@@ -82,7 +84,7 @@ RUN set -eux; \
     test -n "${GVISOR_URL}"; \
     test -n "${GVISOR_SHA512}"; \
     asset=/tmp/gvisor.tar.bz2; \
-    apt-get update; \
+    sh /tmp/apt-get-update.sh; \
     apt-get install -y --no-install-recommends bzip2 ca-certificates curl; \
     rm -rf /var/lib/apt/lists/*; \
     curl -fSL --http1.1 --retry 10 --retry-delay 2 --retry-all-errors \
@@ -106,9 +108,10 @@ ARG AKERNEL_APT_UBUNTU_PORTS_MIRROR
 RUN --mount=type=bind,source=builder/scripts/configure-apt-mirror.sh,target=/tmp/configure-apt-mirror.sh \
     sh /tmp/configure-apt-mirror.sh
 
-RUN set -eux; \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    set -eux; \
     test "${TARGETARCH:-amd64}" = "amd64"; \
-    apt-get update; \
+    sh /tmp/apt-get-update.sh; \
     apt-get install -y --no-install-recommends ca-certificates curl zstd; \
     rm -rf /var/lib/apt/lists/*; \
     archive="/tmp/kata-static-${KATA_RELEASE}-amd64.tar.zst"; \
@@ -147,7 +150,8 @@ ARG AKERNEL_APT_DEBIAN_SECURITY_MIRROR
 RUN --mount=type=bind,source=builder/scripts/configure-apt-mirror.sh,target=/tmp/configure-apt-mirror.sh \
     sh /tmp/configure-apt-mirror.sh
 
-RUN apt-get update && \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    sh /tmp/apt-get-update.sh && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         gcc \
@@ -173,7 +177,8 @@ ARG AKERNEL_APT_DEBIAN_SECURITY_MIRROR
 RUN --mount=type=bind,source=builder/scripts/configure-apt-mirror.sh,target=/tmp/configure-apt-mirror.sh \
     sh /tmp/configure-apt-mirror.sh
 
-RUN apt-get update && \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    sh /tmp/apt-get-update.sh && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
       -o Dpkg::Options::="--force-confold" --no-install-recommends \
       ca-certificates git libcap-ng-dev libseccomp-dev pkg-config && \
@@ -197,7 +202,8 @@ ARG AKERNEL_APT_UBUNTU_PORTS_MIRROR
 RUN --mount=type=bind,source=builder/scripts/configure-apt-mirror.sh,target=/tmp/configure-apt-mirror.sh \
     sh /tmp/configure-apt-mirror.sh
 
-RUN apt-get update && \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    sh /tmp/apt-get-update.sh && \
     apt-get install -y --no-install-recommends ca-certificates cpio curl gzip jq && \
     rm -rf /var/lib/apt/lists/*
 RUN set -eux; \
@@ -275,7 +281,8 @@ ARG AKERNEL_APT_UBUNTU_PORTS_MIRROR
 RUN --mount=type=bind,source=builder/scripts/configure-apt-mirror.sh,target=/tmp/configure-apt-mirror.sh \
     sh /tmp/configure-apt-mirror.sh
 
-RUN set -eux; \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    set -eux; \
     case "${TARGETARCH}" in \
       amd64|arm64) ;; \
       *) echo "unsupported runc target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
@@ -283,7 +290,7 @@ RUN set -eux; \
     test -n "${RUNC_VERSION}"; \
     test -n "${RUNC_SHA256}"; \
     test -n "${RUNC_RELEASE_BASE_URL}"; \
-    apt-get update; \
+    sh /tmp/apt-get-update.sh; \
     apt-get install -y --no-install-recommends ca-certificates curl; \
     rm -rf /var/lib/apt/lists/*; \
     asset="/tmp/runc.${TARGETARCH}"; \
@@ -311,7 +318,8 @@ ARG AKERNEL_APT_UBUNTU_PORTS_MIRROR
 RUN --mount=type=bind,source=builder/scripts/configure-apt-mirror.sh,target=/tmp/configure-apt-mirror.sh \
     sh /tmp/configure-apt-mirror.sh
 
-RUN apt-get update && \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    sh /tmp/apt-get-update.sh && \
     apt-get install -y --no-install-recommends ca-certificates curl jq binutils && \
     rm -rf /var/lib/apt/lists/*
 COPY ./builder/scripts/install-distill-fs.sh /install-distill-fs.sh
@@ -341,7 +349,8 @@ ARG AKERNEL_APT_UBUNTU_PORTS_MIRROR
 RUN --mount=type=bind,source=builder/scripts/configure-apt-mirror.sh,target=/tmp/configure-apt-mirror.sh \
     sh /tmp/configure-apt-mirror.sh
 
-RUN apt-get update && \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    sh /tmp/apt-get-update.sh && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -368,7 +377,8 @@ RUN apt-get update && \
         xfsprogs && \
     rm -rf /var/lib/apt/lists/*
 
-RUN set -eux; \
+RUN --mount=type=bind,source=builder/scripts/apt-get-update.sh,target=/tmp/apt-get-update.sh \
+    set -eux; \
     if [ "${TARGETARCH}" = "arm64" ]; then \
       echo "NVIDIA payload is excluded from the linux/arm64 image"; \
     else \
@@ -380,7 +390,7 @@ RUN set -eux; \
       | sed \
         's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
       > /etc/apt/sources.list.d/nvidia-container-toolkit.list; \
-    apt-get update; \
+    sh /tmp/apt-get-update.sh; \
     apt-get install -y --no-install-recommends \
       "libnvidia-container1=${LIBNVIDIA_CONTAINER_VERSION}" \
       "libnvidia-container-tools=${LIBNVIDIA_CONTAINER_VERSION}"; \

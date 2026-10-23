@@ -181,3 +181,16 @@ adx_data_port              = 80
 # adx_service_annotations = {}
 # adx_load_balancer_ip = ""
 adx_public_access = true
+
+# Optional full JuiceFS stack: Rook/Ceph RGW, PostgreSQL and host FUSE clients.
+# Ceph's StorageClass must support raw Block PVCs. Defaults require three hosts.
+# juicefs = {
+#   enabled                = true
+#   ceph_storage_class     = "YOUR_RAW_BLOCK_STORAGE_CLASS"
+#   postgres_storage_class = "YOUR_FILESYSTEM_STORAGE_CLASS"
+# }
+# To use a pre-mounted AFS/JuiceFS volume instead, keep juicefs disabled:
+# checkpoint_storage = {
+#   kind      = "distributed_fs"
+#   host_path = "/srv/akernel-shared"
+# }

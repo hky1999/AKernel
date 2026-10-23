@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -38,6 +39,29 @@ class ObservabilityTest(unittest.TestCase):
         self.assertIn("prometheus/adx", config["service"]["pipelines"]["metrics"]["receivers"])
         self.assertEqual((ROOT / "builder/config/otel-collector-config.yaml").read_bytes(),
                          (CHART / "files/otel-collector/config.yaml").read_bytes())
+
+    def test_adxlet_samples_the_sandboxd_resource_socket_for_both_clouds(self) -> None:
+        configs = self.resources[("ConfigMap", "akernel-adx-config")]["data"]
+        node = yaml.safe_load(configs["node.yaml"])
+        adxlet = next(s for s in node["services"] if s["role"] == "adxlet")
+        source = adxlet["config"]["resource_source"]
+        self.assertEqual(source["kind"], "sandboxd")
+        self.assertGreater(source["valid_for_seconds"], 0)
+        self.assertNotIn("disk_path", source)
+        sandboxd_configs = {
+            "default": next(r["data"]["sandboxd_config.toml"]
+                            for r in self.resources.values()
+                            if "sandboxd_config.toml" in r.get("data", {})),
+            **{provider: (ROOT / "deploy/terraform" / provider /
+                          "values-akernel.yaml.tmpl").read_text()
+               for provider in ("aliyun", "huaweicloud")},
+        }
+        for provider, config in sandboxd_configs.items():
+            with self.subTest(provider=provider):
+                section = config.split("[plugin.node_resource]", 1)[1]
+                socket = re.search(r'^\s*sock_path\s*=\s*"([^"]+)"', section, re.MULTILINE)
+                self.assertIsNotNone(socket)
+                self.assertEqual(source["socket"], socket.group(1))
 
     def test_node_logs_include_runtime_and_structured_adx_records(self) -> None:
         config = yaml.safe_load((CHART / "files/otel-collector/config.yaml").read_text())

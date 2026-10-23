@@ -25,6 +25,13 @@ MONITOR_STORAGE_CLASS ?=
 INSTALL_MONITOR ?=
 INSTALL_DRAGONFLY ?=
 CHUNK_DB_SIZE ?=
+JUICEFS_ENABLED ?= false
+JUICEFS_STORAGE_CLASS ?=
+JUICEFS_CACHE_MIB ?= 4096
+JUICEFS_CACHE_HOST_PATH ?=
+JUICEFS_CACHE_LARGE_WRITE ?= true
+CHECKPOINT_STORAGE_HOST_PATH ?=
+CHECKPOINT_STORAGE_EXISTING_CLAIM ?=
 ENABLE_RUNC ?=
 SCHEDULE_PLACEMENT_POLICY ?=
 GRAFANA_PUBLIC_ACCESS ?=
@@ -43,6 +50,8 @@ help:
 	@echo "  make config NON_INTERACTIVE=1 ...  Generate config from Make variables"
 	@echo "  make config INSTALL_DRAGONFLY=true Enable optional P2P image distribution"
 	@echo "  make config ENABLE_RUNC=true       Build and register the optional runc runtime"
+	@echo "  make config JUICEFS_ENABLED=true JUICEFS_STORAGE_CLASS=... Deploy JuiceFS/PostgreSQL/Ceph"
+	@echo "  make config CHECKPOINT_STORAGE_HOST_PATH=/srv/shared Use an existing AFS/JuiceFS mount"
 	@echo "  make config SCHEDULE_PLACEMENT_POLICY=binpack Use compact scheduling"
 	@echo "  make build IMAGE_TAG=<tag>          Build the all-in-one image"
 	@echo "  make standalone                    Build current source and start local runsc"
@@ -92,6 +101,12 @@ config:
 	if [[ -n "$(INSTALL_MONITOR)" ]]; then args+=(--install-monitor "$(INSTALL_MONITOR)"); fi; \
 	if [[ -n "$(INSTALL_DRAGONFLY)" ]]; then args+=(--install-dragonfly "$(INSTALL_DRAGONFLY)"); fi; \
 	if [[ -n "$(CHUNK_DB_SIZE)" ]]; then args+=(--chunk-db-size "$(CHUNK_DB_SIZE)"); fi; \
+	args+=(--juicefs-enabled "$(JUICEFS_ENABLED)"); \
+	args+=(--juicefs-cache-mib "$(JUICEFS_CACHE_MIB)" --juicefs-cache-large-write "$(JUICEFS_CACHE_LARGE_WRITE)"); \
+	if [[ -n "$(JUICEFS_CACHE_HOST_PATH)" ]]; then args+=(--juicefs-cache-host-path "$(JUICEFS_CACHE_HOST_PATH)"); fi; \
+	if [[ -n "$(JUICEFS_STORAGE_CLASS)" ]]; then args+=(--juicefs-storage-class "$(JUICEFS_STORAGE_CLASS)"); fi; \
+	if [[ -n "$(CHECKPOINT_STORAGE_HOST_PATH)" ]]; then args+=(--checkpoint-storage-host-path "$(CHECKPOINT_STORAGE_HOST_PATH)"); fi; \
+	if [[ -n "$(CHECKPOINT_STORAGE_EXISTING_CLAIM)" ]]; then args+=(--checkpoint-storage-existing-claim "$(CHECKPOINT_STORAGE_EXISTING_CLAIM)"); fi; \
 	if [[ -n "$(ENABLE_RUNC)" ]]; then args+=(--enable-runc "$(ENABLE_RUNC)"); fi; \
 	if [[ -n "$(SCHEDULE_PLACEMENT_POLICY)" ]]; then args+=(--schedule-placement-policy "$(SCHEDULE_PLACEMENT_POLICY)"); fi; \
 	if [[ -n "$(GRAFANA_PUBLIC_ACCESS)" ]]; then args+=(--grafana-public-access "$(GRAFANA_PUBLIC_ACCESS)"); fi; \
@@ -190,6 +205,7 @@ deploy-standalone-test:
 build-helper-test:
 	@python3 builder/scripts/test-build-image.py
 	@python3 builder/scripts/test-apt-mirror.py
+	@python3 builder/scripts/test-apt-get-update.py
 	@python3 builder/scripts/test-elf-arch.py
 
 .PHONY: standalone-source-test
