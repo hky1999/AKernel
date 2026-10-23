@@ -12,7 +12,7 @@
   },
   "source": {
     "repository": "https://github.com/hky1999/linux.git",
-    "commit": "8cc94383d63b9697b319f4551fe3d44c3def35da",
+    "commit": "a6636dd3df368a17173a7d71de75745f15a0a6c0",
     "baseline_commit": "59ae80123caf09bdacd427595eb3583e9260a2ac",
     "upstream_repository": "https://github.com/virt-pvm/linux",
     "upstream_branch": "pvm-6.12-host-oot",
@@ -20,8 +20,8 @@
   },
   "target": {
     "profile": "tools/pvm-oot/profiles/ubuntu-7.0.0-30-generic/profile.json",
-    "profile_sha256": "40da5f5f13617842917a4470a1ebc7f643098f61a26b84c260040ee7b50d37ab",
-    "prepared_tree_sha256": "fce38cac6c10013d72c3a5ad8dfa54291f0b3c06038d8f56fb93ba2b88c49482",
+    "profile_sha256": "265840c6652114a213b1da01326ab2dae78d10bcde09219ecd36a65643bebbb0",
+    "prepared_tree_sha256": "d12468f9db108b2eab917d3f292b5b7805d13bc42e21ca175b55e6b8d3dd1437",
     "kernel_image_sha256": "0ad39b13e289e1a5cf806d14541ac8f221eefe849017f5915e0846917ed67785",
     "distribution": "Ubuntu 26.04.1 LTS",
     "architecture": "x86_64",
@@ -33,7 +33,7 @@
       "include/generated/utsrelease.h": "9bfeb76d0e75dbbe7e31d187e592f48c8a8f47f7e3cf1398c2308e9e80290d14"
     }
   },
-  "build_evidence_sha256": "6a1611d2f12dd3b70246dc0e988624d71db34fc459191543faae5765a0d0de66",
+  "build_evidence_sha256": "e78a6ef035641638c9a12f3f2dcd51a911c676d8894a32f1cbfcaf2c20de9df2",
   "modules": [
     "kvm.ko",
     "kvm-pvm.ko"
