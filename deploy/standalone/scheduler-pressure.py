@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import tempfile
 import time
 
@@ -78,13 +79,89 @@ class PressureGate:
         return self.accepting, "low_watermark" if self.accepting else "warming"
 
 
+
+class RuntimeAdmission:
+    """Independent subpool hysteresis and an operator-owned, expiring veto."""
+    def __init__(self, config, host_identity, recovery_millis):
+        if not isinstance(config, dict) or set(config) != {"pool", "guard"}:
+            raise ValueError("整链压力配置字段不完整")
+        self.pool, self.guard = config["pool"], config["guard"]
+        if set(self.pool) != {"path", "device", "inode", "memory_max_bytes", "high_bytes", "low_bytes", "psi_high_per_mille", "psi_low_per_mille"} or set(self.guard) != {"path", "identity", "max_age_millis"}:
+            raise ValueError("整链子池或准入观察字段不完整")
+        if any(type(self.pool[k]) is not int for k in self.pool if k != "path") or not 0 < self.pool["low_bytes"] < self.pool["high_bytes"] < self.pool["memory_max_bytes"] or not 0 <= self.pool["psi_low_per_mille"] < self.pool["psi_high_per_mille"] <= 1000 or self.pool["inode"] <= 0:
+            raise ValueError("整链子池边界无效")
+        identity = self.guard["identity"]
+        if not isinstance(identity, dict) or set(identity) != {"host_id", "boot_id", "parent_device", "parent_inode", "profile_sha256", "pool_device", "pool_inode"}:
+            raise ValueError("整链身份字段不完整")
+        if any(identity[k] != host_identity[k] for k in ("host_id", "boot_id", "parent_device", "parent_inode")) or identity["pool_device"] != self.pool["device"] or identity["pool_inode"] != self.pool["inode"]:
+            raise ValueError("整链身份不属于当前宿主与子池")
+        profile = identity["profile_sha256"]
+        if not isinstance(profile, str) or len(profile) != 64 or any(c not in "0123456789abcdef" for c in profile):
+            raise ValueError("整链策略摘要无效")
+        if type(self.guard["max_age_millis"]) is not int or not 100 <= self.guard["max_age_millis"] <= 10000:
+            raise ValueError("整链观察有效期无效")
+        for name in (self.pool["path"], self.guard["path"]):
+            if not isinstance(name, str) or not Path(name).is_absolute() or Path(name).resolve() != Path(name):
+                raise ValueError("整链路径必须是规范绝对路径")
+        self.recovery_millis = recovery_millis
+        self.fail()
+
+    def fail(self):
+        self.accepting, self.low_since = False, None
+
+    def update(self, monotonic_millis):
+        p = Path(self.pool["path"])
+        st = p.lstat()
+        if p.is_symlink() or not p.is_dir() or (st.st_dev, st.st_ino) != (self.pool["device"], self.pool["inode"]):
+            raise RuntimeError("工作负载子池身份变化")
+        if int((p/"memory.max").read_text()) != self.pool["memory_max_bytes"]:
+            raise RuntimeError("工作负载子池上限变化")
+        current = int((p/"memory.current").read_text())
+        if not 0 <= current <= self.pool["memory_max_bytes"]:
+            raise ValueError("工作负载子池计数无效")
+        psi = psi_per_mille((p/"memory.pressure").read_text())
+        path = Path(self.guard["path"])
+        before = path.lstat()
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino) or opened.st_mode & 0o022:
+                raise ValueError("整链观察文件类型或权限无效")
+            data = stream.read(8193)
+        if len(data) > 8192:
+            raise ValueError("整链观察过大")
+        value = json.loads(data)
+        fields = {"schema", "identity", "sequence", "control_session", "observed_unix_millis", "valid_until_unix_millis", "admission_open", "reason"}
+        now = time.time_ns()//1000000
+        if not isinstance(value, dict) or set(value) != fields or value["schema"] != 1 or value["identity"] != self.guard["identity"] or type(value["sequence"]) is not int or value["sequence"] <= 0 or any(type(value[k]) is not int for k in ("observed_unix_millis", "valid_until_unix_millis")) or not value["observed_unix_millis"] <= now < value["valid_until_unix_millis"] or not 0 < value["valid_until_unix_millis"]-value["observed_unix_millis"] <= self.guard["max_age_millis"] or type(value["admission_open"]) is not bool:
+            raise ValueError("整链观察过期、缺失或身份不符")
+        session = value["control_session"]
+        if not isinstance(session, str) or len(session) != 32 or any(c not in "0123456789abcdef" for c in session) or not isinstance(value["reason"], str) or not 1 <= len(value["reason"]) <= 64 or (value["admission_open"] and value["reason"] != "ready"):
+            raise ValueError("整链会话或准入原因无效")
+        if current >= self.pool["high_bytes"] or psi >= self.pool["psi_high_per_mille"]:
+            self.fail()
+            return False, "high_watermark"
+        if not value["admission_open"]:
+            self.fail()
+            return False, "runtime_guard_closed"
+        if current <= self.pool["low_bytes"] and psi <= self.pool["psi_low_per_mille"]:
+            if self.low_since is None or monotonic_millis < self.low_since:
+                self.low_since = monotonic_millis
+            if monotonic_millis-self.low_since >= self.recovery_millis:
+                self.accepting = True
+        else:
+            self.low_since = None
+        return self.accepting, "low_watermark" if self.accepting else "warming"
+
+
 class HostObserver:
     def __init__(self, config):
         required = {"identity", "parent_path", "parent_memory_max_bytes", "parent_cpu_max", "storage_pins", "disk_path", "output", "valid_for_millis", "sample_interval_millis", "policy"}
-        if set(config) != required:
+        if set(config) not in (required, required | {"runtime"}):
             raise ValueError("宿主观测配置字段不完整")
         self.config = config
         self.gate = PressureGate(config["policy"])
+        self.runtime_gate = RuntimeAdmission(config["runtime"], config["identity"], config["policy"]["recovery_millis"]) if "runtime" in config else None
         if (type(config["valid_for_millis"]) is not int or type(config["sample_interval_millis"]) is not int
                 or not 100 <= config["sample_interval_millis"] <= 1000
                 or not 2 * config["sample_interval_millis"] <= config["valid_for_millis"] <= 10000):
@@ -188,16 +265,26 @@ class HostObserver:
         observed = time.time_ns() // 1000000
         if self.last_sample_monotonic is not None and not 0 <= started - self.last_sample_monotonic < self.config["valid_for_millis"]:
             self.gate.fail()
+            if self.runtime_gate is not None:
+                self.runtime_gate.fail()
         self.last_sample_monotonic = started
         try:
             metrics = self.sample()
+            accepting, reason = self.gate.update(metrics, started)
+            if self.runtime_gate is not None:
+                runtime_accepting, runtime_reason = self.runtime_gate.update(started)
+                if not runtime_accepting:
+                    accepting = False
+                    if reason != "high_watermark":
+                        reason = runtime_reason
             finished = time.monotonic_ns() // 1000000
             if not 0 <= finished - started <= self.config["sample_interval_millis"]:
                 raise RuntimeError("单次压力采集超过有界窗口")
-            accepting, reason = self.gate.update(metrics, started)
             self.last_metrics = metrics
         except (OSError, ValueError, KeyError, RuntimeError):
             self.gate.fail()
+            if self.runtime_gate is not None:
+                self.runtime_gate.fail()
             accepting, reason, metrics = False, "observation_failed", self.last_metrics
         return self.publish(accepting, reason, metrics, observed)
 

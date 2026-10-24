@@ -86,3 +86,11 @@ sandboxd `[plugin.resource]` 的 `memory_high_ratio=0.75`，冲突配置拒绝�
 节点完整可用性仍限制新增自动策略。压力关闭允许既有授权缩容及精确结算，不使缺少容量或生命周期就绪证明的节点获得新自动授权。
 
 消费端同样直接检查所在Linux宿主的boot ID，拒绝旧启动期间仍未到期的观测。本配置只覆盖同宿主中心和节点，跨宿主观测传输与验证另行开发。
+
+## 独立整链准入观察
+
+scheduler-pressure.py的私有配置可增加runtime字段，其中pool固定path、device、inode、memory_max_bytes、high_bytes、low_bytes、psi_high_per_mille及psi_low_per_mille，guard固定path、identity和max_age_millis。此字段由操作者显式加入独立宿主观察配置，默认启动配置不会自动启用。
+
+pool读取真实memory.max、memory.current及memory.pressure，不替换原宿主、父分组或磁盘指标。guard.identity包含host_id、boot_id、parent_device、parent_inode、profile_sha256、pool_device和pool_inode；观察文件包含schema=1、identity、正sequence、32位十六进制control_session、observed_unix_millis、valid_until_unix_millis、admission_open和reason。文件须为有界普通文件且不能组写或全员写。开放时reason为ready。缺失、过期、身份或子池上限变化时关闭准入；显式关闭、子池高水位及PSI只会收紧原宿主门，恢复仍须连续低水位窗口。
+
+现有对外schema1及八项真实metrics保持，额外整链状态留在独立文件。该观察不授权资源操作，也不证明已经拥有应急驻留容量。启用前必须在同一持久预算中预留服务与峰值、验证独立应急页及增长和回收边界；物理结论在调度器VERSION.md单独登记。
