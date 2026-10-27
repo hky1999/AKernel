@@ -580,6 +580,50 @@ class Sandbox:
         load_backend().delete_snapshot(_snapshot_id(snapshot_id))
 
     @classmethod
+    def create(
+        cls,
+        snapshot_id: str | SnapshotInfo,
+        *,
+        idle_timeout: int = 300,
+        schedule_timeout: int = 30,
+        timeout: int | None = None,
+        name: str | None = None,
+        cwd: str | None = None,
+        port_forwardings: Sequence[int] | None = None,
+        mounts: Sequence[Mount] | None = None,
+        reverse_tunnel: HttpReverseTunnel | None = None,
+        detached: bool = False,
+        failover: bool = False,
+        node_id: str | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> Sandbox:
+        """Create a new sandbox from a reusable snapshot, following E2B naming.
+
+        Accepts an opaque snapshot ID or SnapshotInfo. All options, validation,
+        ownership and failure semantics are identical to ``from_snapshot()``,
+        which remains supported. In particular, ``timeout`` is a logical create
+        budget, not an E2B sandbox lifetime; restrictions require an explicit
+        ``network_policy``. This method requires a snapshot: fresh image or
+        Dockerfile creation still uses ``Sandbox(image=..., dockerfile=...)``.
+        Template aliases and foreign platform snapshot IDs are not resolved.
+        """
+        return cls.from_snapshot(
+            snapshot_id,
+            idle_timeout=idle_timeout,
+            schedule_timeout=schedule_timeout,
+            timeout=timeout,
+            name=name,
+            cwd=cwd,
+            port_forwardings=port_forwardings,
+            mounts=mounts,
+            reverse_tunnel=reverse_tunnel,
+            detached=detached,
+            failover=failover,
+            node_id=node_id,
+            network_policy=network_policy,
+        )
+
+    @classmethod
     def from_snapshot(
         cls,
         snapshot_id: str | SnapshotInfo,
@@ -598,6 +642,9 @@ class Sandbox:
         network_policy: NetworkPolicy | None = None,
     ) -> Sandbox:
         """Restore a ready snapshot into a new sandbox with a new ID.
+
+        Retained compatibility entry point for ``Sandbox.create(snapshot_id)``;
+        both methods have the same options and lifecycle contract.
 
         Inherits captured runtime, resource geometry and process state; does not
         rerun Dockerfile setup or the image entrypoint. The source is unaffected.

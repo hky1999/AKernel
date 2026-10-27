@@ -146,6 +146,58 @@ class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
             time.sleep(0.05)
         self.fail("worker did not respond")
 
+    def test_create_and_from_snapshot_restore_the_same_saved_state(self):
+        source = self.source
+        setup = source.commands.run("mkdir -p /tmp/fork-acceptance")
+        self.assertEqual(setup.exit_code, 0, setup.stderr)
+        source.files.write("/tmp/fork-acceptance/data", "0123456789abcdef")
+        source.files.write("/tmp/fork-acceptance/marker", "captured")
+        source.files.write("/tmp/fork-acceptance/worker.py", _WORKER)
+        source.commands.run("python3 /tmp/fork-acceptance/worker.py", background=True)
+        before = self.witness(source)
+        snapshot = source.create_snapshot()
+        self.assertEqual(self.witness(source, "advance")["value"], 1)
+        source.files.write("/tmp/fork-acceptance/marker", "after-capture")
+        source.kill()
+
+        restored = Sandbox.create(snapshot.snapshot_id, cwd="/tmp")
+        self.remember([restored])
+        compatible = Sandbox.from_snapshot(snapshot, cwd="/tmp")
+        self.remember([compatible])
+        self.assertEqual(len({source.id, restored.id, compatible.id}), 3)
+        for child in (restored, compatible):
+            self.assertEqual(self.witness(child), before)
+            self.assertEqual(
+                child.files.read("/tmp/fork-acceptance/marker"), "captured"
+            )
+        changed = self.witness(restored, "advance")
+        self.assertEqual(changed["value"], before["value"] + 1)
+        self.assertEqual(changed["offset"], before["offset"] + 4)
+        restored.files.write("/tmp/fork-acceptance/marker", "created")
+        self.assertEqual(self.witness(compatible), before)
+        self.assertEqual(
+            compatible.files.read("/tmp/fork-acceptance/marker"), "captured"
+        )
+        restored.kill()
+        self.assertEqual(self.witness(compatible), before)
+        self.assertEqual(len(self.snapshot_ids), 1)
+        print(
+            "proof:",
+            json.dumps(
+                {
+                    "case": "create_from_snapshot_compatibility",
+                    "snapshot_count": 1,
+                    "restored_instances": 2,
+                    "memory_pid_fd_before": before,
+                    "create_after_mutation": changed,
+                    "from_snapshot_unchanged": True,
+                    "source_deleted_before_restore": True,
+                    "compatibility_child_survives_other_deletion": True,
+                }
+            ),
+            flush=True,
+        )
+
     def test_memory_process_open_fd_and_private_writes(self):
         source = self.source
         setup = source.commands.run("mkdir -p /tmp/fork-acceptance")

@@ -412,9 +412,13 @@ The node sets `ADX_EXECD_CONTROL_SOCKET_PATH=/run/akernel`, making the socket
 available at `/run/akernel/execd.sock`. Do not present that socket protocol as a
 stable public SDK interface. Reusable snapshots are a separate public contract:
 `Sandbox.create_snapshot()`, `get_snapshot()`, `list_snapshots()`,
-`delete_snapshot()` and `Sandbox.from_snapshot()` operate on independent snapshot
-IDs. Keep backend-native types and lifecycle/connection work in `_backends`;
-restore must inherit captured resources and must not rerun fresh-boot setup.
+`delete_snapshot()` and `Sandbox.create(snapshot_id)` operate on independent
+snapshot IDs. Preserve `Sandbox.from_snapshot()` as the compatible restore entry
+point with identical options, ownership and error semantics. `create` requires a
+snapshot ID or SnapshotInfo, not an image, template alias or no-argument default;
+fresh creation stays on the constructor. Keep backend-native types and
+lifecycle/connection work in `_backends`; restore must inherit captured resources
+and must not rerun fresh-boot setup.
 `sandbox.fork(count=N)` captures once and returns an ordered Sandbox/Exception
 per child, preserving partial successes. The pinned ADX SDK/API has no native
 batch fork; the adapter composes reusable snapshot/create/delete operations.

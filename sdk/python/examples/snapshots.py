@@ -41,7 +41,8 @@ def main() -> None:
                     s.snapshot_id == snapshot.snapshot_id for s in pages.next_items()
                 )
             assert found
-        with Sandbox.from_snapshot(snapshot) as restored:
+        # Sandbox.from_snapshot(snapshot) remains supported with identical options.
+        with Sandbox.create(snapshot) as restored:
             assert restored.id != source.id
             assert restored.files.read("/tmp/snapshot-example") == "saved"
             print("Restored a new sandbox from", snapshot.snapshot_id)

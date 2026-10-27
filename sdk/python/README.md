@@ -551,7 +551,7 @@ try:
         print(Sandbox.get_snapshot(snapshot.snapshot_id))
         # Source resumes after capture; it can also be deleted independently.
 
-    with Sandbox.from_snapshot(snapshot.snapshot_id) as restored:
+    with Sandbox.create(snapshot.snapshot_id) as restored:
         assert restored.files.read("/tmp/progress") == "turn 10"
 finally:
     if snapshot is not None:
@@ -564,12 +564,18 @@ finally:
 | `Sandbox.get_snapshot(snapshot_id)` | Query catalog metadata by opaque ID; pending deletion may still return metadata. |
 | `Sandbox.list_snapshots(name=None, limit=None, next_token=None)` | Lazy `SnapshotPaginator`; `limit` is the page size. Returns the accessible catalog, optionally filtered by name. |
 | `Sandbox.delete_snapshot(snapshot_id)` | Idempotent deletion, returns `None`; existing restored sandboxes remain alive. |
-| `Sandbox.from_snapshot(snapshot_id, ...)` | New `Sandbox`, new ID and fresh commands/files/PTY facades; does not delete or change the source. Accepts an ID or `SnapshotInfo`. |
+| `Sandbox.create(snapshot_id, ...)` | New `Sandbox`, new ID and fresh commands/files/PTY facades; does not delete or change the source. Accepts an ID or `SnapshotInfo`. |
+| `Sandbox.from_snapshot(snapshot_id, ...)` | Retained compatibility entry point with the same options, validation, errors and ownership as `create`. |
 
-The naming and paginator pattern follow E2B. Deliberate differences: use explicit
-`from_snapshot` instead of overloading an image/template argument; listing is a
-class-level catalog operation, including when accessed through an instance;
-delete returns `None` because the backend does not distinguish absent from
+The naming and paginator pattern follow E2B, including
+`Sandbox.create(snapshot.snapshot_id)`. Unlike E2B's combined template/snapshot
+entry point, AKernel `create` requires a snapshot ID (positional or
+`snapshot_id=...`) or `SnapshotInfo`; it has no default template and does not
+resolve template aliases or another platform's snapshot IDs. Use
+`Sandbox(image=...)` or the Dockerfile constructor for fresh environments.
+Existing `Sandbox.from_snapshot(...)` calls remain supported and need no changes.
+Listing is a class-level catalog operation, including when accessed through an
+instance; delete returns `None` because the backend does not distinguish absent from
 newly deleted snapshots. Only memory/filesystem capture is exposed; no
 unsupported filesystem-only mode or fabricated timestamps/storage metrics.
 
@@ -602,9 +608,10 @@ released. Catalog records may remain queryable while Deleting, so a successful
 `get_snapshot()` is not a readiness or physical-deletion check. Once collection
 marks the snapshot Deleted, the backend returns not-found. The
 current backend descriptor exposes only ID and names, not catalog state; the
-service validates readiness on `from_snapshot()`. Storage locality and cross-node
-restore depend on cluster configuration. Capturing complete process state does not imply a full physical
-copy: incremental/reflink storage is a runtime/deployment concern, not selected
+service validates readiness on `create()` / `from_snapshot()`. Storage locality
+and cross-node restore depend on cluster configuration. Capturing complete
+process state does not imply a full physical copy: incremental/reflink storage
+is a runtime/deployment concern, not selected
 by this API. These APIs are separate from anonymous failover/reload checkpoints.
 
 A remote snapshot does not save the host harness conversation or cursor, model
