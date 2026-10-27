@@ -96,7 +96,6 @@ class SnapshotCreateTest(unittest.TestCase):
     def test_invalid_options_fail_before_loading_backend(self):
         for options in (
             {"snapshot_id": ""},
-            {"snapshot_id": None},
             {"snapshot_id": 42},
             {"snapshot_id": "saved", "timeout": 0},
             {"snapshot_id": "saved", "schedule_timeout": True},
@@ -113,17 +112,33 @@ class SnapshotCreateTest(unittest.TestCase):
                 Sandbox.create(**options)
         self.load.assert_not_called()
 
-    def test_snapshot_is_required_and_fresh_options_are_not_silently_used(self):
+    def test_restore_rejects_fresh_overrides_and_unknown_template_option(self):
         for options in (
-            {},
-            {"image": "python:3.13-slim"},
             {"template": "label"},
             {"snapshot_id": "saved", "cpu": 1000},
             {"snapshot_id": "saved", "dockerfile": object()},
         ):
-            with self.subTest(options=options), self.assertRaises(TypeError):
+            with (
+                self.subTest(options=options),
+                self.assertRaises((TypeError, ValueError)),
+            ):
                 Sandbox.create(**options)
         self.load.assert_not_called()
+
+    def test_fresh_create_supports_image_and_cluster_default(self):
+        self.backend.create.return_value = self.session
+        with Sandbox.create(
+            image="python:3.13-slim", cpu=2000, memory=1024, envs={"HELLO": "world"}
+        ) as created:
+            self.assertEqual(created.id, "restored-child")
+            spec = self.backend.create.call_args.args[0]
+            self.assertEqual(spec.image, "python:3.13-slim")
+            self.assertEqual(spec.cpu, 2000)
+            self.assertEqual(spec.memory, 1024)
+            self.assertEqual(spec.env, {"HELLO": "world"})
+        with Sandbox.create():
+            self.assertIsNone(self.backend.create.call_args.args[0].image)
+        self.backend.from_snapshot.assert_not_called()
 
     def test_unknown_outcome_and_interruption_are_not_replayed(self):
         for failure in (

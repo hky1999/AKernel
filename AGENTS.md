@@ -562,6 +562,14 @@ The Python SDK installs its execution backend automatically. Preserve the
 public `AKERNEL_SERVER_ADDRESS=host[:port]` and `AKERNEL_TOKEN` contract.
 Retired backend selector names map to ADX without installing old dependencies.
 Native conversions remain under `akernel_sdk._backends`.
+Lifecycle wrappers use explicit by-ID lookup/deletion, lazy filtered pagination
+and an isolated Client; preserve legacy constructor, id, detached kill and
+unchecked CommandResult behavior. close disconnects locally; pause/connect keep
+the logical ID, while snapshot restore/fork create new IDs. Feature-gate metadata,
+running lifetime, command output and user execution before mutations; never
+emulate lifetime with idle timeout or client-side timers. Attachment rollback
+must never delete an existing sandbox. Keep command reconnection free of replay.
+
 `BackendOperationError` preserves optional structured service fields and the
 original cause; missing context remains `None`. Keep retry/outcome semantics
 backend-owned and document public error fields in `sdk/python/README.md`.

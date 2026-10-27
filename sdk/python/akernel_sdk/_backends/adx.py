@@ -16,14 +16,22 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import time
+import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import adx_environment
+import httpx
+from adx_environment._transport import EnvironmentClient, EnvironmentNotFound
+from adx_environment.commands import CommandHandle as NativeCommandHandle
+from adx_environment.commands import CommandNotFound as NativeCommandNotFound
+from adx_environment.tunnel_client import TunnelClient
 
+from .._sandboxes import SandboxQuery, normalize_metadata
 from ..types import (
     CommandInfo,
     CommandResult,
@@ -43,12 +51,21 @@ from .base import (
     BackendConfig,
     BackendSession,
     Capability,
+    CommandOutput,
     ForkOutcome,
+    SandboxConnectSpec,
     SandboxSpec,
     SnapshotRestoreSpec,
 )
 from .errors import (
+    AuthenticationException,
     BackendOperationError,
+    NotFoundException,
+    PermissionDeniedException,
+    RateLimitException,
+    SandboxNotFoundException,
+    ServiceBusyException,
+    TimeoutException,
     UnsupportedBackendFeatureError,
     retain_failure_context,
 )
@@ -59,6 +76,81 @@ _DEFAULT_LISTEN_PORT = 8766
 # this reserve it either rejects the budget or silently increases it.
 _CREATE_RESERVE_SECONDS = 60
 logger = logging.getLogger(__name__)
+
+
+def _directory_info(row: Mapping[str, Any]) -> SandboxInfo:
+    identity = row.get("id")
+    state = row.get("status")
+    if not isinstance(identity, str) or not identity or not isinstance(state, str):
+        raise BackendOperationError("invalid sandbox directory entry")
+    return SandboxInfo(
+        id=identity,
+        state=state,
+        cpu=row.get("required_cpu"),
+        memory=row.get("required_mem"),
+        image=row.get("image") or None,
+        metadata=normalize_metadata(row.get("metadata")),
+        expires_at_unix_seconds=row.get("expires_at_unix_seconds"),
+    )
+
+
+def _require_control_feature(client: Any, feature: str) -> None:
+    response = client._http.get(f"{client._base}/capabilities", timeout=30)
+    if response.status_code == 404:
+        raise UnsupportedBackendFeatureError(f"backend does not support {feature}")
+    if response.status_code >= 400:
+        raise client._http_error(response)
+    values = response.json().get("capabilities")
+    if not isinstance(values, list) or feature not in values:
+        raise UnsupportedBackendFeatureError(f"backend does not support {feature}")
+
+
+def _create_fields(spec: SandboxSpec | SnapshotRestoreSpec) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    if spec.metadata:
+        fields["metadata"] = dict(spec.metadata)
+    if spec.lifetime_timeout is not None:
+        fields["lifetimeTimeoutSeconds"] = spec.lifetime_timeout
+    return {"sdk_create_fields": fields} if fields else {}
+
+
+def _bind_tunnel(sandbox: Any, tunnel: Any, connection: Any) -> None:
+    if tunnel is None:
+        return
+    gateway = connection.gateway_address or connection.server_address
+    tls = connection.gateway_use_tls
+    scheme = "wss" if tls else "ws"
+    safe_id = sandbox._client._safe_id(sandbox.id)
+    client = TunnelClient(
+        tunnel.target,
+        token=connection.resolved_token() if tls else None,
+        environment_id=sandbox.id,
+    )
+    sandbox._tunnel_client = client
+    sandbox._upstream = tunnel.target
+    sandbox._tunnel_url = f"http://127.0.0.1:{tunnel.listen_port}"
+    try:
+        if not client.start(
+            f"{scheme}://{gateway}/tunnel/{safe_id}", timeout=tunnel.connect_timeout
+        ):
+            raise BackendOperationError(
+                "reverse tunnel did not become ready", environment_id=sandbox.id
+            )
+    except BaseException as failure:
+        try:
+            client.stop()
+        except Exception as cleanup:
+            retain_failure_context(failure, sandbox.id, cleanup)
+        else:
+            sandbox._tunnel_client = None
+        raise
+
+
+def _unbind_tunnel(sandbox: Any) -> None:
+    tunnel = getattr(sandbox, "_tunnel_client", None)
+    if tunnel is not None:
+        tunnel.stop()
+        sandbox._tunnel_client = None
 
 
 def _validate_restore_timeout(schedule_timeout: int, timeout: int) -> None:
@@ -190,7 +282,35 @@ def _native_network_policy(policy: NetworkPolicy) -> Any:
 
 
 def _convert_error(operation: str, error: Exception) -> BackendOperationError:
-    return BackendOperationError(
+    status = getattr(error, "status_code", None)
+    error_type: type[BackendOperationError] = {
+        401: AuthenticationException,
+        403: PermissionDeniedException,
+        404: NotFoundException,
+        429: RateLimitException,
+        503: ServiceBusyException,
+    }.get(status if isinstance(status, int) else 0, BackendOperationError)
+    if isinstance(error, EnvironmentNotFound):
+        error_type = SandboxNotFoundException
+    elif isinstance(error, NativeCommandNotFound):
+        error_type = NotFoundException
+    elif isinstance(
+        error,
+        (
+            AuthenticationException,
+            PermissionDeniedException,
+            NotFoundException,
+            TimeoutException,
+            RateLimitException,
+            ServiceBusyException,
+        ),
+    ):
+        error_type = type(error)
+    elif getattr(error, "code", None) in {"COMMAND_NOT_FOUND", "COMMAND_EXPIRED"}:
+        error_type = NotFoundException
+    elif isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        error_type = TimeoutException
+    return error_type(
         f"{operation} failed: {error}",
         code=getattr(error, "code", None),
         retry=getattr(error, "retry", None),
@@ -204,6 +324,7 @@ def _convert_error(operation: str, error: Exception) -> BackendOperationError:
         probe_failure=getattr(error, "probe_failure", None),
         request_forwarded=getattr(error, "request_forwarded", None),
         cleanup_errors=getattr(error, "cleanup_errors", ()) or (),
+        command_id=getattr(error, "command_id", None),
     )
 
 
@@ -255,6 +376,7 @@ def _command_info(value: Any) -> CommandInfo:
         pid=int(value.pid),
         command=str(value.command),
         running=bool(value.running),
+        command_id=value.id if isinstance(getattr(value, "id", None), str) else None,
     )
 
 
@@ -273,6 +395,109 @@ class _CommandsDriver:
     def __init__(self, commands: Any) -> None:
         self._commands = commands
         self._handles: dict[int, Any] = {}
+        self._features: set[str] | None = None
+
+    def _require(self, feature: str) -> None:
+        if self._features is None:
+            try:
+                value = self._commands._client.invoke(
+                    self._commands._sid, "process.capabilities", {}
+                )
+                features = value.get("capabilities")
+                if not isinstance(features, list) or not all(
+                    isinstance(v, str) for v in features
+                ):
+                    raise BackendOperationError("invalid command capability response")
+                self._features = set(features)
+            except Exception as error:
+                raise _convert_error("read command capabilities", error) from error
+        if feature not in self._features:
+            raise UnsupportedBackendFeatureError(
+                f"the deployed Execd does not support {feature}"
+            )
+
+    def require_output(self) -> None:
+        self._require("incremental-command-output-v1")
+
+    def output(self, pid: int, stdout_offset: int, stderr_offset: int) -> CommandOutput:
+        self.require_output()
+        handle = self._handles.get(pid)
+        if handle is None:
+            raise NotFoundException(f"no connected command for pid {pid}")
+        try:
+            value = self._commands._client.invoke(
+                self._commands._sid,
+                "process.output",
+                {
+                    "command_id": handle.id,
+                    "stdout_offset": stdout_offset,
+                    "stderr_offset": stderr_offset,
+                    "limit": 65536,
+                },
+                timeout=5,
+            )
+            if value.get("error"):
+                raise BackendOperationError(
+                    str(value["error"]), code=value.get("error_code")
+                )
+            if value.get("truncated"):
+                raise BackendOperationError(
+                    "command output was truncated by runtime limits",
+                    code="OUTPUT_TRUNCATED",
+                    command_id=handle.id,
+                )
+            stdout = base64.b64decode(value["stdout_base64"], validate=True)
+            stderr = base64.b64decode(value["stderr_base64"], validate=True)
+            if (
+                len(stdout) > 65536
+                or len(stderr) > 65536
+                or any(
+                    isinstance(value[key], bool) or not isinstance(value[key], int)
+                    for key in ("stdout_offset", "stderr_offset")
+                )
+            ):
+                raise BackendOperationError("invalid command output length/cursor")
+            if value["stdout_offset"] != stdout_offset + len(stdout) or value[
+                "stderr_offset"
+            ] != stderr_offset + len(stderr):
+                raise BackendOperationError("invalid command output cursor")
+            if not isinstance(value["terminal"], bool) or not isinstance(
+                value["has_more"], bool
+            ):
+                raise BackendOperationError("invalid command output state")
+            return CommandOutput(
+                stdout,
+                stderr,
+                value["stdout_offset"],
+                value["stderr_offset"],
+                value["terminal"],
+                value["has_more"],
+            )
+        except Exception as error:
+            raise _convert_error("read command output", error) from error
+
+    def command_id(self, pid: int) -> str | None:
+        value = getattr(self._handles.get(pid), "id", None)
+        return value if isinstance(value, str) else None
+
+    def connect(self, command: str | int) -> int:
+        try:
+            identity = command
+            if isinstance(command, int):
+                records = [row for row in self._commands.list() if row.pid == command]
+                if len(records) != 1:
+                    raise NotFoundException(
+                        f"no unique tracked command for pid {command}"
+                    )
+                identity = records[0].id
+            handle = self._commands.get(identity)
+            pid = handle.pid
+            if pid is None or pid <= 0:
+                raise BackendOperationError("connected command has no assigned PID")
+            self._handles[int(pid)] = handle
+            return int(pid)
+        except Exception as error:
+            raise _convert_error("connect command", error) from error
 
     def run(
         self,
@@ -281,8 +506,24 @@ class _CommandsDriver:
         envs: Mapping[str, str] | None,
         cwd: str | None,
         timeout: int,
+        user: str | None = None,
     ) -> CommandResult:
         try:
+            if user is not None:
+                pid = self.start(
+                    cmd,
+                    envs=envs,
+                    cwd=cwd,
+                    stdin=False,
+                    user=user,
+                    execution_timeout=timeout,
+                )
+                value = self._handles[pid].wait(timeout)
+                if timeout_message := _command_timeout_message(value, timeout):
+                    raise TimeoutException(
+                        timeout_message, command_id=self.command_id(pid)
+                    )
+                return _command_result(value)
             value = self._commands.run(
                 cmd,
                 envs=dict(envs) if envs is not None else None,
@@ -305,15 +546,61 @@ class _CommandsDriver:
         envs: Mapping[str, str] | None,
         cwd: str | None,
         stdin: bool,
+        user: str | None = None,
+        execution_timeout: int | None = None,
     ) -> int:
         try:
-            handle = self._commands.run(
-                cmd,
-                background=True,
-                envs=dict(envs) if envs is not None else None,
-                cwd=cwd,
-                stdin=stdin,
-            )
+            if user is None:
+                options = (
+                    {"timeout": execution_timeout}
+                    if execution_timeout is not None
+                    else {}
+                )
+                handle = self._commands.run(
+                    cmd,
+                    background=True,
+                    envs=dict(envs) if envs is not None else None,
+                    cwd=cwd,
+                    stdin=stdin,
+                    **options,
+                )
+            else:
+                self._require("command-user-v1")
+                identity = "cmd-" + str(uuid.uuid4())
+                body: dict[str, Any] = {
+                    "command_id": identity,
+                    "command": cmd,
+                    "envs": dict(envs) if envs is not None else None,
+                    "cwd": cwd,
+                    "want_stdin": stdin,
+                    "user": user,
+                }
+                if execution_timeout is not None:
+                    body["timeout"] = execution_timeout
+                try:
+                    value = self._commands._client.invoke(
+                        self._commands._sid, "process.start", body
+                    )
+                except Exception as error:
+                    failure = _convert_error("start user command", error)
+                    failure.command_id = identity
+                    failure.environment_id = (
+                        failure.environment_id or self._commands._sid
+                    )
+                    failure.outcome = failure.outcome or "unknown"
+                    raise failure from error
+                if value.get("error"):
+                    raise BackendOperationError(
+                        str(value["error"]),
+                        code=value.get("error_code"),
+                        command_id=identity,
+                    )
+                handle = NativeCommandHandle(
+                    identity,
+                    self._commands._client,
+                    self._commands._sid,
+                    int(value.get("pid") or 0),
+                )
             # A successful submission may precede PID assignment. Resolve the
             # stable command ID with reads, never submit the command twice.
             pid = handle.pid
@@ -443,7 +730,7 @@ class _Session:
     def __init__(
         self,
         sandbox: Any,
-        spec: SandboxSpec | SnapshotRestoreSpec,
+        spec: SandboxSpec | SnapshotRestoreSpec | SandboxConnectSpec,
         connection: Any,
     ) -> None:
         self.id = str(sandbox.id)
@@ -458,7 +745,7 @@ class _Session:
         self._terminated = False
         self._closed = False
         self._network_policy = spec.network_policy
-        self._network_policy_known = True
+        self._network_policy_known = not isinstance(spec, SandboxConnectSpec)
 
     def is_running(self) -> bool:
         if self._terminated or self._closed:
@@ -480,7 +767,62 @@ class _Session:
             image=image or None,
             xpu=self._spec.xpu,
             storage_mb=self._spec.storage_mb,
+            metadata=getattr(value, "metadata", {}),
+            expires_at_unix_seconds=getattr(value, "expires_at_unix_seconds", None),
         )
+
+    def set_timeout(self, timeout: int) -> None:
+        if self._closed or self._terminated:
+            raise RuntimeError("cannot update a closed sandbox")
+        client = self._sandbox._client
+        try:
+            _require_control_feature(client, "environment-lifetime-v1")
+            result = client._lifecycle_request(
+                client._safe_id(self.id),
+                operation="timeout",
+                body={"lifetimeTimeoutSeconds": timeout},
+                timeout_seconds=60,
+            )
+            if result.get("success") is not True:
+                raise BackendOperationError(
+                    "timeout update was not confirmed",
+                    environment_id=self.id,
+                    outcome="unknown",
+                )
+            self._spec = replace(self._spec, lifetime_timeout=timeout)
+        except UnsupportedBackendFeatureError:
+            raise
+        except Exception as error:
+            raise _convert_error("set sandbox timeout", error) from error
+
+    def pause(self, timeout: int) -> bool:
+        if self._closed or self._terminated:
+            raise RuntimeError("cannot pause a closed sandbox")
+        if self.get_info().state == "paused":
+            return False
+        # Stop retries before pausing: a reconnecting tunnel can demand-resume
+        # the environment immediately after the pause commits.
+        try:
+            _unbind_tunnel(self._sandbox)
+            self._sandbox.pause(
+                timeout_seconds=timeout,
+                retention=adx_environment.RetentionPolicy.forever(),
+            )
+        except BaseException as error:
+            try:
+                if (
+                    getattr(self._sandbox, "_tunnel_client", None) is None
+                    and self.get_info().state == "running"
+                ):
+                    _bind_tunnel(
+                        self._sandbox, self._spec.reverse_tunnel, self._connection
+                    )
+            except Exception as cleanup:
+                retain_failure_context(error, self.id, cleanup)
+            if isinstance(error, Exception):
+                raise _convert_error("pause sandbox", error) from error
+            raise
+        return True
 
     def create_snapshot(self, name: str | None, timeout: int) -> SnapshotInfo:
         try:
@@ -535,6 +877,8 @@ class _Session:
                 # ADX restores resources but not execution network policy.
                 # Send the last acknowledged policy atomically with creation.
                 network_policy=self._network_policy,
+                metadata=self._spec.metadata,
+                lifetime_timeout=self._spec.lifetime_timeout,
             )
             for _ in range(count):
                 try:
@@ -695,6 +1039,7 @@ class _OwnedSandbox(adx_environment.Environment):
     """Native handle whose lifecycle is owned by the AKernel session."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._sdk_create_fields = kwargs.pop("sdk_create_fields", {})
         try:
             super().__init__(*args, **kwargs)
         except BaseException as error:
@@ -732,6 +1077,19 @@ class _OwnedSandbox(adx_environment.Environment):
                         exc_info=True,
                     )
             raise
+
+    def _create(self, body: dict[str, Any]) -> dict[str, Any]:
+        fields = self._sdk_create_fields
+        for key, feature in (
+            ("metadata", "environment-metadata-v1"),
+            ("lifetimeTimeoutSeconds", "environment-lifetime-v1"),
+        ):
+            if key in fields:
+                _require_control_feature(self._client, feature)
+        return super()._create({**body, **fields})
+
+    def get_info(self) -> SandboxInfo:
+        return _directory_info(self._client.environment_info(self.id))
 
     def __del__(self) -> None:
         # GC can run while HTTPX holds a non-reentrant pool lock. Network
@@ -795,6 +1153,168 @@ class AdxBackend:
             instance_id, connection=_control_pty_connection(self._connection)
         )
 
+    def get_sandbox(self, sandbox_id: str) -> SandboxInfo:
+        client = EnvironmentClient(connection=self._connection)
+        try:
+            return _directory_info(client.environment_info(sandbox_id))
+        except Exception as error:
+            raise _convert_error("get sandbox info", error) from error
+        finally:
+            client.close()
+
+    def delete_sandbox(self, sandbox_id: str) -> bool:
+        client = EnvironmentClient(connection=self._connection)
+        try:
+            try:
+                client.environment_info(sandbox_id)
+            except adx_environment.EnvironmentError as error:
+                if getattr(error, "status_code", None) == 404 or isinstance(
+                    error, EnvironmentNotFound
+                ):
+                    return False
+                raise
+            client.delete(sandbox_id)
+            return True
+        except Exception as error:
+            raise _convert_error("delete sandbox", error) from error
+        finally:
+            client.close()
+
+    def list_sandboxes(
+        self, query: SandboxQuery, next_token: str | None, limit: int
+    ) -> tuple[list[SandboxInfo], str | None]:
+        client = EnvironmentClient(connection=self._connection)
+        items: list[SandboxInfo] = []
+        token = next_token
+        seen: set[str] = set()
+        try:
+            if query.metadata:
+                _require_control_feature(client, "environment-metadata-v1")
+            while len(items) < limit:
+                params: dict[str, Any] = {"pageSize": limit - len(items)}
+                if token is not None:
+                    params["pageToken"] = token
+                response = client._http.get(
+                    f"{client._origin}/api/instances", params=params, timeout=60
+                )
+                if response.status_code >= 400:
+                    raise client._http_error(response)
+                data = response.json()
+                rows: Any
+                if isinstance(data, list):
+                    rows, following = data, None
+                    if len(rows) > params["pageSize"]:
+                        raise UnsupportedBackendFeatureError(
+                            "this directory version does not support bounded pagination"
+                        )
+                elif isinstance(data, dict):
+                    rows = data.get("items")
+                    following = data.get("nextPageToken") or None
+                else:
+                    raise BackendOperationError("invalid sandbox directory response")
+                if not isinstance(rows, list) or (
+                    following is not None and not isinstance(following, str)
+                ):
+                    raise BackendOperationError("invalid sandbox directory page")
+                if len(rows) > params["pageSize"]:
+                    raise BackendOperationError(
+                        "directory exceeded requested page size"
+                    )
+                for row in rows:
+                    if not isinstance(row, dict):
+                        raise BackendOperationError("invalid sandbox directory entry")
+                    info = _directory_info(row)
+                    if info.state in (query.state or ()) and all(
+                        info.metadata.get(k) == v
+                        for k, v in (query.metadata or {}).items()
+                    ):
+                        items.append(info)
+                if following is None:
+                    return items, None
+                if following == token or following in seen:
+                    raise BackendOperationError(
+                        "non-advancing sandbox directory cursor"
+                    )
+                seen.add(following)
+                token = following
+            return items, token
+        except UnsupportedBackendFeatureError:
+            raise
+        except Exception as error:
+            raise _convert_error("list sandboxes", error) from error
+        finally:
+            client.close()
+
+    def connect(self, spec: SandboxConnectSpec) -> BackendSession:
+        tunnel = spec.reverse_tunnel
+        if tunnel is not None and tunnel.reverse_port != tunnel.listen_port - 1:
+            raise UnsupportedBackendFeatureError(
+                "Backend 'adx' requires reverse_port to equal listen_port - 1."
+            )
+        client = EnvironmentClient(connection=self._connection)
+        deadline = time.monotonic() + spec.timeout
+        resumed = False
+        try:
+            while True:
+                info = client.environment_info(
+                    spec.environment_id, timeout=max(0.1, deadline - time.monotonic())
+                )
+                state = info.get("status")
+                if state == "running":
+                    break
+                if state == "paused" and not resumed:
+                    client.resume(spec.environment_id)
+                    resumed = True
+                elif state not in {"pausing", "resuming", "paused"}:
+                    raise BackendOperationError(
+                        f"cannot connect to sandbox in state {state}",
+                        environment_id=spec.environment_id,
+                        outcome="not_started",
+                    )
+                if time.monotonic() >= deadline:
+                    raise BackendOperationError(
+                        "sandbox connect timed out", environment_id=spec.environment_id
+                    )
+                time.sleep(0.1)
+        except Exception as error:
+            raise _convert_error("connect sandbox", error) from error
+        finally:
+            client.close()
+        sandbox = None
+        try:
+            sandbox = _OwnedSandbox.from_id(
+                spec.environment_id, connection=self._connection
+            )
+            sandbox._cwd = spec.command_cwd
+            sandbox.commands._default_cwd = spec.command_cwd
+            sandbox._forwarded_ports = set(spec.port_forwardings)
+            spec = replace(
+                spec,
+                metadata=normalize_metadata(info.get("metadata")),
+                lifetime_timeout=info.get("lifetime_timeout_seconds"),
+            )
+            session = _Session(sandbox, spec, self._connection)
+            while True:
+                try:
+                    session.commands.list()
+                    break
+                except BackendOperationError as error:
+                    if not _route_read_retryable(error) or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.1)
+            _bind_tunnel(sandbox, tunnel, self._connection)
+            return session
+        except BaseException as error:
+            retain_failure_context(error, spec.environment_id)
+            if sandbox is not None:
+                try:
+                    sandbox.close()
+                except Exception as cleanup:
+                    retain_failure_context(error, spec.environment_id, cleanup)
+            if isinstance(error, Exception):
+                raise _convert_error("connect sandbox", error) from error
+            raise
+
     def _validate(self, spec: SandboxSpec) -> None:
         tunnel = spec.reverse_tunnel
         if tunnel is not None and tunnel.reverse_port != tunnel.listen_port - 1:
@@ -818,7 +1338,7 @@ class AdxBackend:
         if spec.network_policy is not None:
             network = _native_network_policy(spec.network_policy)
         mounts = [_native_mount(mount) for mount in spec.mounts]
-        create_timeout = spec.schedule_timeout + 60
+        create_timeout = spec.create_timeout or spec.schedule_timeout + 60
         create_args = dict(
             image=spec.image,
             rootfs=rootfs,
@@ -862,9 +1382,12 @@ class AdxBackend:
                 port_forward_mode="tls",
             ),
             connection=self._connection,
+            **_create_fields(spec),
         )
         try:
             sandbox = _OwnedSandbox(**create_args)
+        except UnsupportedBackendFeatureError:
+            raise
         except Exception as error:
             raise _convert_error("create sandbox", error) from error
         session = None
@@ -939,7 +1462,10 @@ class AdxBackend:
                     port_forward_mode="tls",
                 ),
                 connection=connection,
+                **_create_fields(spec),
             )
+        except UnsupportedBackendFeatureError:
+            raise
         except Exception as error:
             raise _convert_error("restore snapshot", error) from error
         session = None

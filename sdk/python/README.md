@@ -17,6 +17,7 @@ PTYs, port forwarding, and reverse tunnels.
   - [Filesystem](#filesystem)
   - [Interactive PTYs](#interactive-ptys)
   - [Port forwarding](#port-forwarding)
+  - [Lifecycle compatibility](#lifecycle-compatibility)
   - [Reusable snapshots](#reusable-snapshots)
   - [Local failover and reload](#local-failover-and-reload)
   - [Reverse tunnels](#reverse-tunnels)
@@ -447,6 +448,40 @@ handle.close_stdin()
 result = handle.wait(timeout=15)
 ```
 
+Commands can be reattached by stable `command_id` (preferred) or an observed
+PID without submitting them again:
+
+```python
+handle = sandbox.commands.run("sleep 2; printf done", background=True)
+command_id = handle.command_id
+sandbox.close()
+attached = Sandbox.connect(sandbox.sandbox_id)
+try:
+    result = attached.commands.connect(command_id).wait(timeout=30, check=True)
+finally:
+    attached.close()
+```
+
+`check=True` on run/wait opts into `CommandExitException` for nonzero exit,
+retaining stdout, stderr and exit_code, and `TimeoutException` for an unfinished
+observation. The default continues returning `CommandResult`. Authentication,
+permission, missing-resource, timeout, rate-limit and service-busy exceptions
+subclass `BackendOperationError` and retain structured service context.
+
+`on_stdout` / `on_stderr` receive decoded text during run/wait, preserving split
+UTF-8 sequences. They require Execd `incremental-command-output-v1`.
+`user="name"`, `"uid"`, or `"uid:gid"` requires Execd `command-user-v1`.
+Unsupported capabilities fail before command submission. For background handles,
+callbacks run when `wait()` observes output; `disconnect()` stops that local
+output observation, without killing the process. Callbacks are not replay-safe
+transactions: callback failures propagate and retain command identity, and the
+remote command continues. Reconnect explicitly; never resubmit an unknown command.
+
+```python
+result = sandbox.commands.run("id -u; printf done", user="nobody",
+    on_stdout=lambda text: print(text, end=""), check=True)
+```
+
 Foreground commands return a backend-neutral `CommandResult`. Background
 commands return an AKernel `CommandHandle`; its lifecycle operations are
 delegated to the selected backend.
@@ -533,6 +568,104 @@ with Sandbox(port_forwardings=[8080]) as sandbox:
 deployment operator explicitly wants the direct ADX Ingress address instead of the
 public gateway.
 
+## Lifecycle compatibility
+
+These source APIs follow E2B's Python naming while preserving AKernel's existing
+constructor, ID, detached cleanup, command-result and creation-budget contracts.
+They are not present in an older published wheel merely because its package
+version matches this checkout. Pin a tested source revision when installing.
+
+```python
+from akernel_sdk import Client, SandboxQuery, SandboxState
+
+client = Client(api_url="https://akernel.example.com", api_key="<tenant-key>",
+                verify_tls=True)
+# An explicit Client captures its own API/gateway/token. It neither changes
+# os.environ nor redirects top-level Sandbox operations. Specify gateway_address
+# when the data gateway differs. Addresses must be HTTP(S) origins without paths.
+source = client.Sandbox.create(image="python:3.13-slim", idle_timeout=600)
+identity = source.sandbox_id  # source.id remains supported
+try:
+    source.files.write("/tmp/progress", "saved")
+    assert source.pause()  # beta_pause() is an alias; already paused returns False
+    source.close()         # closes local transports, retaining the remote sandbox
+    restored = client.Sandbox.connect(identity)
+    try:
+        assert restored.sandbox_id == identity
+        assert restored.files.read("/tmp/progress") == "saved"
+    finally:
+        restored.close()
+    print(client.Sandbox.get_info(identity))  # get_by_id(identity) also supported
+    pages = client.Sandbox.list(limit=20,
+        query=SandboxQuery(state=[SandboxState.RUNNING, SandboxState.PAUSED]))
+    while pages.has_next:
+        for info in pages.next_items():
+            print(info.sandbox_id, info.state)
+finally:
+    source.close()
+    client.Sandbox.kill(identity)  # bool: False means already absent
+```
+
+`connect` attaches to Running or resumes Paused under the **same logical ID**.
+It does not create a replacement, rerun a Dockerfile, restart a command, or create
+`cwd`. It waits for Pausing/Resuming to settle and errors on other states. Its
+`timeout` is a logical connection/resume wait budget; transport retry margins and
+tunnel initialization can add elapsed time. Supply `port_forwardings` and
+`reverse_tunnel` again to reconstruct local routing; do not reuse old PTYs or
+streams. A failed attachment closes only local resources and never deletes the
+existing sandbox. As with fresh sandboxes, a connected handle's context manager
+owns remote deletion unless `detached=True`; use `close()` to retain it.
+
+Pause creates an anonymous in-place checkpoint with permanent retention until
+explicit deletion. It is separate from `create_snapshot()`'s reusable catalog
+snapshot and `from_snapshot()`'s new ID. The SDK stops its own reverse tunnel
+before pause so that its reconnect loop cannot immediately demand-resume the
+sandbox. Other connected clients or inbound traffic may still resume it.
+Pause errors and unknown outcomes propagate; False means authoritatively paused.
+
+| Operation | Ownership and result |
+| --- | --- |
+| `sandbox.close()` | Idempotent local disconnect; does not delete the remote sandbox. Closing PTYs terminates their interactive processes. |
+| `sandbox.kill()` / context exit | Existing behavior: owned handles delete remote state and close locally; detached handles only close locally. Returns None. |
+| `sandbox.kill(delete_remote=True)` | Explicit remote deletion, including detached or previously closed handles. Failures remain retryable. |
+| `Sandbox.kill(id)` / `Sandbox.kill_by_id(id)` | Canonical by-ID deletion, returns bool. False means already absent; permission/network/unknown errors propagate. |
+| `Sandbox.delete(sandbox_id=id)` | Explicit by-ID deletion returning None; existing positional `Sandbox.delete(name)` continues to delete a named detached sandbox. |
+| `sandbox.get_info()` / `Sandbox.get_info(id)` | Handle or canonical directory query; `get_by_id(id)` is an explicit class alias. |
+| `Sandbox.list(query=..., limit=20, next_token=None)` | Lazy paginator. `next_items()` fetches one filtered page, `has_next` and `next_token` retain progress. Errors do not advance the cursor. Default states are Running and Paused. |
+
+### Running lifetime and metadata
+
+`create_timeout` on the constructor and the existing factory/restore `timeout`
+are creation budgets, not maximum lifetimes. `schedule_timeout` bounds scheduling;
+`idle_timeout` measures inactivity. These meanings remain unchanged.
+
+The [candidate ADX backend](https://github.com/hky1999/agent-dx/tree/hky1999/sdk-lifecycle-20261027) adds `environment-lifetime-v1` and
+`environment-metadata-v1`. A matching **API Server and node** are required for
+the following example; an older deployment rejects requested capabilities before
+creation instead of silently ignoring them. These capabilities have separate
+backend component tests; the existing cluster lifecycle POC does not certify a
+backend rollout.
+
+```python
+with client.Sandbox.create(image="python:3.13-slim", idle_timeout=0,
+        lifetime_timeout=300, metadata={"task": "example"}) as sandbox:
+    sandbox.set_timeout(600)  # remaining running lifetime from the accepted update
+    info = sandbox.get_info()
+    print(info.metadata, info.end_at)  # end_at is UTC datetime or None
+pages = client.Sandbox.list(query=SandboxQuery(metadata={"task": "example"}))
+```
+
+Lifetime is enforced by the node, independently of traffic and idle policy;
+expiry is processed on its lifecycle tick, not an exact real-time deadline.
+Pause clears the active running deadline; resume arms the last configured
+lifetime duration again. This is not a paused-checkpoint retention setting.
+`set_timeout` requires Running state and does not restart the workload.
+Metadata is an immutable creation-time string map, separate from scheduler
+labels; limits are 64 entries, UTF-8 keys 1..256 bytes and values up to 4096 bytes.
+Queries match all requested key/value pairs across directory pages. Ordinary
+snapshot restores default to empty metadata/no running lifetime unless supplied;
+SDK `fork` carries its source settings into each child.
+
 ## Reusable snapshots
 
 This API is available in this source revision; previously published `0.2.0rc2`
@@ -568,12 +701,11 @@ finally:
 | `Sandbox.from_snapshot(snapshot_id, ...)` | Retained compatibility entry point with the same options, validation, errors and ownership as `create`. |
 
 The naming and paginator pattern follow E2B, including
-`Sandbox.create(snapshot.snapshot_id)`. Unlike E2B's combined template/snapshot
-entry point, AKernel `create` requires a snapshot ID (positional or
-`snapshot_id=...`) or `SnapshotInfo`; it has no default template and does not
-resolve template aliases or another platform's snapshot IDs. Use
-`Sandbox(image=...)` or the Dockerfile constructor for fresh environments.
-Existing `Sandbox.from_snapshot(...)` calls remain supported and need no changes.
+`Sandbox.create(snapshot.snapshot_id)`. Without a snapshot ID,
+`Sandbox.create(image=...)` creates a fresh sandbox, and `Sandbox.create()`
+uses the cluster default rootfs. Existing constructors and
+`Sandbox.from_snapshot(...)` remain supported. AKernel does not resolve E2B
+or agentenv template aliases or another platform's snapshot IDs.
 Listing is a class-level catalog operation, including when accessed through an
 instance; delete returns `None` because the backend does not distinguish absent from
 newly deleted snapshots. Only memory/filesystem capture is exposed; no
@@ -1050,7 +1182,7 @@ sandbox.kill()             # closes local clients; remote sandbox remains
 Sandbox.delete("worker")   # terminates the named remote sandbox
 ```
 
-`sandbox.id` is the physical ID shown by `ak list`. `get_info()` returns a
+`sandbox.id` (also `sandbox.sandbox_id`) is the logical ID shown by `ak list`. `get_info()` returns a
 `SandboxInfo` containing `id`, state, requested CPU, memory, XPU and storage,
 and the OCI image when one was configured.
 
@@ -1092,6 +1224,7 @@ Maintained examples are under [`examples/`](./examples):
 - `custom_image.py`
 - `dockerfile_launch.py`
 - `snapshots.py`
+- `lifecycle.py`
 - `failover_reload.py`
 - `gpu_sandbox.py`
 - `hostpath_mounts.py`

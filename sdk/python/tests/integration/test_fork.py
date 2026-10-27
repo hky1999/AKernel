@@ -26,7 +26,13 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from akernel_sdk import BackendOperationError, ForkCleanupError, Sandbox
+from akernel_sdk import (
+    BackendOperationError,
+    ForkCleanupError,
+    Sandbox,
+    SandboxQuery,
+    SandboxState,
+)
 from akernel_sdk._backends import adx
 
 _ENABLED = os.environ.get("AKERNEL_RUN_INTEGRATION") == "1"
@@ -145,6 +151,50 @@ class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
                     }
             time.sleep(0.05)
         self.fail("worker did not respond")
+
+    def test_pause_connect_preserves_memory_and_close_ownership(self):
+        source = self.source
+        source.commands.run("mkdir -p /tmp/fork-acceptance")
+        source.files.write("/tmp/fork-acceptance/data", "0123456789abcdef")
+        source.files.write("/tmp/fork-acceptance/worker.py", _WORKER)
+        source.commands.run("python3 /tmp/fork-acceptance/worker.py", background=True)
+        before = self.witness(source)
+        self.assertTrue(source.pause())
+        self.assertFalse(source.beta_pause())
+        source.close()
+        self.assertEqual(Sandbox.get_info(source.id).state, "paused")
+        pages = Sandbox.list(query=SandboxQuery(state=[SandboxState.PAUSED]), limit=1)
+        visible = []
+        while pages.has_next:
+            visible.extend(pages.next_items())
+        self.assertIn(source.id, [row.sandbox_id for row in visible])
+        self.assertTrue(all(row.state == "paused" for row in visible))
+        connected = Sandbox.connect(source.id, cwd="/tmp")
+        self.remember([connected])
+        self.assertEqual(connected.sandbox_id, source.id)
+        self.assertEqual(self.witness(connected), before)
+        connected.close()
+        self.assertEqual(Sandbox.get_info(source.id).state, "running")
+        again = Sandbox.connect(source.id)
+        self.remember([again])
+        self.assertEqual(self.witness(again), before)
+        self.assertTrue(Sandbox.kill(source.id))
+        self.assertFalse(Sandbox.kill(source.id))
+        print(
+            "proof:",
+            json.dumps(
+                {
+                    "case": "pause_connect_lifecycle",
+                    "same_id": True,
+                    "memory_pid_fd": before,
+                    "paused_query": True,
+                    "close_keeps_remote": True,
+                    "running_connect": True,
+                    "idempotent_by_id_delete": True,
+                }
+            ),
+            flush=True,
+        )
 
     def test_create_and_from_snapshot_restore_the_same_saved_state(self):
         source = self.source

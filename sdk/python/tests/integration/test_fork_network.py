@@ -160,6 +160,46 @@ class ForkNetworkIntegrationTest(test_fork.ForkIntegrationFixture, unittest.Test
         self.assert_port(self.source, "source")
         return results
 
+    def test_pause_connect_rebinds_tunnel_and_published_port(self):
+        source = self.source
+        self.assert_tunnel(source)
+        self.assert_port(source, "source")
+        self.assert_egress(source, True)
+        source.update_network_policy(NetworkPolicy.block())
+        self.assertTrue(source.pause())
+        time.sleep(1)
+        self.assertEqual(Sandbox.get_info(source.id).state, "paused")
+        source.close()
+        connected = Sandbox.connect(
+            source.id,
+            reverse_tunnel=self.sandbox_options["reverse_tunnel"],
+            port_forwardings=[self.published_port],
+            cwd="/tmp",
+        )
+        self.remember([connected])
+        self.assertEqual(connected.id, source.id)
+        self.assert_tunnel(connected)
+        self.assert_port(connected, "source")
+        self.assert_egress(connected, False)
+        connected.close()
+        self.assertEqual(Sandbox.get_info(source.id).state, "running")
+        self.assert_port(source, "source")
+        print(
+            "proof:",
+            json.dumps(
+                {
+                    "case": "pause_connect_network",
+                    "same_id": True,
+                    "tunnel_rebound": True,
+                    "published_port": True,
+                    "paused_did_not_demand_resume": True,
+                    "network_policy_retained": True,
+                    "close_keeps_service": True,
+                }
+            ),
+            flush=True,
+        )
+
     def test_fork_rebinds_tunnels_and_private_published_ports(self):
         children = self.fork_two()
         self.source.kill()

@@ -54,6 +54,7 @@ class BackendOperationError(RuntimeError):
         probe_failure: dict[str, Any] | None = None,
         request_forwarded: bool | None = None,
         cleanup_errors: tuple[Exception, ...] = (),
+        command_id: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -68,6 +69,49 @@ class BackendOperationError(RuntimeError):
         self.probe_failure = probe_failure
         self.request_forwarded = request_forwarded
         self.cleanup_errors = cleanup_errors
+        self.command_id = command_id
+
+
+class AuthenticationException(BackendOperationError):
+    """The cluster rejected the caller's authentication."""
+
+
+class PermissionDeniedException(BackendOperationError):
+    """The identity is authenticated but cannot perform the operation."""
+
+
+class NotFoundException(BackendOperationError):
+    """The requested resource does not exist or is not visible."""
+
+
+class SandboxNotFoundException(NotFoundException):
+    """The requested sandbox does not exist or is not visible."""
+
+
+class TimeoutException(BackendOperationError):
+    """An operation or command wait exceeded its declared timeout."""
+
+
+class RateLimitException(BackendOperationError):
+    """The service rejected work because of a caller or capacity limit."""
+
+
+class ServiceBusyException(BackendOperationError):
+    """The service is temporarily unavailable; inspect retry/outcome context."""
+
+
+class CommandExitException(BackendOperationError):
+    """An explicitly checked command exited unsuccessfully."""
+
+    def __init__(self, stdout: str, stderr: str, exit_code: int) -> None:
+        super().__init__(
+            f"command exited with code {exit_code}",
+            code="COMMAND_EXITED",
+            outcome="terminal",
+        )
+        self.stdout = stdout
+        self.stderr = stderr
+        self.exit_code = exit_code
 
 
 def retain_failure_context(

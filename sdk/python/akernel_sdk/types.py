@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -469,6 +470,7 @@ class CommandInfo:
     pid: int
     command: str
     running: bool
+    command_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -482,6 +484,22 @@ class SandboxInfo:
     image: str | None
     xpu: str | None = None
     storage_mb: int | None = None
+    metadata: Mapping[str, str] = field(default_factory=dict)
+    expires_at_unix_seconds: int | None = None
+
+    @property
+    def sandbox_id(self) -> str:
+        """E2B-style identity alias; ``id`` remains supported."""
+        return self.id
+
+    @property
+    def end_at(self) -> datetime | None:
+        """Running lifetime deadline in UTC; None means no active deadline."""
+        return (
+            datetime.fromtimestamp(self.expires_at_unix_seconds, timezone.utc)
+            if self.expires_at_unix_seconds is not None
+            else None
+        )
 
 
 @dataclass(frozen=True)
