@@ -28,6 +28,7 @@ from unittest.mock import patch
 
 from akernel_sdk import (
     BackendOperationError,
+    CommandExitException,
     ForkCleanupError,
     Sandbox,
     SandboxQuery,
@@ -163,11 +164,15 @@ class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
         self.remember([verifier])
         self.assertNotEqual(verifier.id, restored.id)
         self.assertFalse(verifier.files.exists("/tmp/catalog-marker"))
-        verifier.files.write("/tmp/submitted-artifact", artifact)
-        result = verifier.commands.run(
-            "test \"$(cat /tmp/submitted-artifact)\" = captured-state; "
-            "printf verifier-passed", check=True
+        check = (
+            "test \"$(cat /tmp/submitted-artifact)\" = captured-state && "
+            "printf verifier-passed"
         )
+        verifier.files.write("/tmp/submitted-artifact", "invalid-output")
+        with self.assertRaises(CommandExitException):
+            verifier.commands.run(check, check=True)
+        verifier.files.write("/tmp/submitted-artifact", artifact)
+        result = verifier.commands.run(check, check=True)
         self.assertEqual(result.stdout, "verifier-passed")
         restored.kill()
         Sandbox.delete_snapshot(snapshot.snapshot_id)
@@ -178,6 +183,7 @@ class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
             "source_deleted_before_restore": True,
             "captured_resources_retained": True,
             "independent_verifier": True,
+            "verifier_rejects_invalid_output": True,
         }), flush=True)
 
     def witness(self, sandbox, action="inspect"):
