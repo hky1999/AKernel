@@ -502,6 +502,9 @@ Collect creation errors from all backend results plus prior public binding
 errors. Automatic rollback deletes only ownership-confirmed new children;
 local closure without a remote deletion acknowledgement must leave a pending
 cleanup handle for an explicit kill, including on older create responses.
+Bootstrap rollback must retain secondary BaseExceptions on the original
+failure, including before a session is returned; merge those known pending
+children with the fork loop's results without automatically retrying them.
 Run `sdk/python/tests/integration/test_fork.py` with explicit integration opt-in
 and a complete Python root image to validate memory/FD and private-write
 isolation. This is distinct from a read-only CLI mount image.

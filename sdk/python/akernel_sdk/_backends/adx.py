@@ -637,6 +637,24 @@ class _Session:
         )
         self._fork_snapshot: _ForkSnapshotLease | None = None
 
+    @classmethod
+    def _cleanup_handle(
+        cls, sandbox: Any, connection: Any, *, closed: bool
+    ) -> _Session:
+        """Retain a killable session when driver initialization never completed.
+
+        Only close/terminate and the identity are usable; do not rebind drivers
+        or open a tunnel while handling an initialization failure.
+        """
+        result = cls.__new__(cls)
+        result.id = str(sandbox.id)
+        result._sandbox = sandbox
+        result._connection = connection
+        result._closed = closed
+        result._terminated = False
+        result._fork_snapshot = None
+        return result
+
     @property
     def fork_snapshot_id(self) -> str | None:
         return None if self._fork_snapshot is None else self._fork_snapshot.snapshot_id
@@ -790,7 +808,13 @@ class _Session:
         results: list[BackendSession | Exception],
     ) -> None:
         children = [child for child in results if not isinstance(child, Exception)]
-        pending: list[BackendSession] = []
+        # A readiness/binding failure may have created a child before returning
+        # its session to the loop. Its rollback was already attempted: retain it
+        # without automatically retrying deletion during another cancellation.
+        unreturned: list[BackendSession] = list(
+            getattr(failure, "_fork_pending_sessions", ())
+        )
+        pending: list[BackendSession] = list(unreturned)
         errors: list[BaseException] = []
         for child in children:
             try:
@@ -809,7 +833,9 @@ class _Session:
             errors.append(error)
         retain_fork_failure(
             failure, snapshot_id=snapshot_id,
-            created_environment_ids=tuple(child.id for child in children),
+            created_environment_ids=tuple(
+                child.id for child in (*children, *unreturned)
+            ),
             pending_environment_ids=tuple(child.id for child in pending),
             cleanup_errors=tuple(errors),
             creation_errors=tuple(r for r in results if isinstance(r, Exception)),
@@ -993,12 +1019,12 @@ class _OwnedSandbox(adx_environment.Environment):
                 try:
                     if not getattr(self, "_closed", False):
                         self.close()
-                except Exception as cleanup_error:
+                except BaseException as cleanup_error:
                     if identity:
                         retain_failure_context(error, identity, cleanup_error)
                 try:
                     client.close()
-                except Exception as cleanup_error:
+                except BaseException as cleanup_error:
                     if identity:
                         retain_failure_context(error, identity, cleanup_error)
             deleted = isinstance(client, _ConstructionClient) and client.deleted
@@ -1009,13 +1035,19 @@ class _OwnedSandbox(adx_environment.Environment):
                     adx_environment.Environment.delete(
                         identity, connection=kwargs.get("connection")
                     )
-                except Exception as cleanup_error:
+                    deleted = True
+                except BaseException as cleanup_error:
                     retain_failure_context(error, identity, cleanup_error)
                     logger.warning(
                         "failed to roll back constructing sandbox %s",
                         identity,
                         exc_info=True,
                     )
+            if identity and not deleted:
+                _retain_pending_creation(
+                    error, self, kwargs.get("connection"), None,
+                    closed=getattr(self, "_closed", False) is True,
+                )
             raise
         finally:
             # Guard constructor rollback on reused or unconfirmed identities.
@@ -1050,25 +1082,44 @@ def _rollback_created(
     """Rollback a known create without replacing its original failure."""
     identity = str(sandbox.id)
     retain_failure_context(failure, identity)
+    deleted = False
+    closed = False
     if session is not None:
         try:
-            session.rollback_creation()
-        except Exception as cleanup_error:
+            deleted = session.rollback_creation() is True
+        except BaseException as cleanup_error:
             retain_failure_context(failure, identity, cleanup_error)
             logger.warning("failed to clean up sandbox %s", identity, exc_info=True)
-        return
-    for cleanup in (
-        sandbox.close,
-        lambda: (
-            adx_environment.Environment.delete(identity, connection=connection)
-            if sandbox.newly_created is True else None
-        ),
-    ):
+    else:
         try:
-            cleanup()
-        except Exception as cleanup_error:
+            sandbox.close()
+            closed = True
+        except BaseException as cleanup_error:
             retain_failure_context(failure, identity, cleanup_error)
             logger.warning("failed to clean up sandbox %s", identity, exc_info=True)
+        if getattr(sandbox, "newly_created", False) is True:
+            try:
+                adx_environment.Environment.delete(identity, connection=connection)
+                deleted = True
+            except BaseException as cleanup_error:
+                retain_failure_context(failure, identity, cleanup_error)
+                logger.warning("failed to clean up sandbox %s", identity, exc_info=True)
+    if not deleted:
+        _retain_pending_creation(failure, sandbox, connection, session, closed=closed)
+
+
+def _retain_pending_creation(
+    failure: BaseException, sandbox: Any, connection: Any,
+    session: BackendSession | None, *, closed: bool,
+) -> None:
+    """Keep a known bootstrap resource without inferring ownership from errors."""
+    context: Any = failure
+    pending = tuple(getattr(failure, "_fork_pending_sessions", ()))
+    if all(child.id != str(sandbox.id) for child in pending):
+        handle = session if session is not None else _Session._cleanup_handle(
+            sandbox, connection, closed=closed
+        )
+        context._fork_pending_sessions = (*pending, handle)
 
 
 class AdxBackend:

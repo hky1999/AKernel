@@ -873,6 +873,11 @@ retained alongside other cleanup errors rather than replacing the first one.
 After releasing unresolved users, explicitly retry snapshot deletion. Unknown
 creation errors retain their lookup/request context; do not blindly delete a
 lookup name as though it were a confirmed-created ID.
+Restore readiness and native session/tunnel initialization can fail before a
+child reaches the fork result list. Secondary interruptions while closing or
+rolling back are retained on the original exception. Known unresolved bootstrap
+children still appear in the fork's pending IDs and cleanup-only handles; their
+failed automatic rollback is not repeated before returning the cancellation.
 `creation_errors` combines the complete backend result set with earlier public
 binding errors, deduplicated by exception identity. It preserves nested request,
 operation, lookup and rollback context even if binding an earlier child is

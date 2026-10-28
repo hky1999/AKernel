@@ -148,6 +148,85 @@ class ForkIntegrationFixture:
 
 @unittest.skipUnless(_ENABLED and _IMAGE, "enable integration and set a python3 image")
 class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
+    def test_readiness_and_rollback_interruptions_keep_real_child_reconcilable(self):
+        create = adx._OwnedSandbox.create
+        rollback = adx._Session.rollback_creation
+        primary = KeyboardInterrupt("client-injected restore readiness interruption")
+        secondary = KeyboardInterrupt("client-injected rollback interruption")
+        children = []
+        rollback_attempts = []
+
+        def interrupt_readiness(*args, **kwargs):
+            native = create(*args, **kwargs)
+            children.append(native)
+            # A separately recorded, test-owned handle guarantees teardown even
+            # if reconciliation assertions fail. It makes no new remote calls.
+            self.remember(
+                [
+                    Sandbox._session_handle(
+                        adx._Session._cleanup_handle(
+                            native, kwargs["connection"], closed=False
+                        ),
+                        reverse_tunnel=None,
+                        ports=[],
+                        detached=False,
+                    )
+                ]
+            )
+            patcher = patch.object(native.commands, "list", side_effect=primary)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            return native
+
+        def interrupt_rollback(child):
+            if children and child.id == children[0].id:
+                rollback_attempts.append(child.id)
+                child.close()
+                # Inject at the rollback boundary without fabricating a True
+                # ownership response on older deployments that omit the bit.
+                raise secondary
+            return rollback(child)
+
+        with (
+            patch.object(adx._OwnedSandbox, "create", side_effect=interrupt_readiness),
+            patch.object(adx._Session, "rollback_creation", new=interrupt_rollback),
+            self.assertRaises(BaseException) as raised,
+        ):
+            self.source.fork()
+        error = raised.exception
+        self.assertIs(error, primary)
+        self.assertEqual(error.environment_id, children[0].id)
+        self.assertEqual(error.created_environment_ids, (children[0].id,))
+        self.assertEqual(error.pending_environment_ids, (children[0].id,))
+        self.assertEqual(error.snapshot_id, self.snapshot_ids[0])
+        self.assertIn(secondary, error.cleanup_errors)
+        self.assertEqual(rollback_attempts, [children[0].id])
+        self.assertEqual(Sandbox.get_info(children[0].id).state, "running")
+        pending = self.remember(error.pending_sandboxes)[0]
+        pending.kill()
+        with self.assertRaises(SandboxNotFoundException):
+            Sandbox.get_info(children[0].id)
+        Sandbox.delete_snapshot(error.snapshot_id)
+        self.assertEqual(
+            self.source.commands.run("printf source-alive").stdout, "source-alive"
+        )
+        print(
+            "proof:",
+            json.dumps(
+                {
+                    "case": "readiness_then_rollback_interruption",
+                    "fault_injection": "client-only",
+                    "original_interruption_preserved": True,
+                    "known_child_before_result_append": True,
+                    "secondary_cleanup_interruption_retained": True,
+                    "automatic_rollback_attempted_once": True,
+                    "pending_handle_explicit_kill_retry": True,
+                    "source_untouched": True,
+                }
+            ),
+            flush=True,
+        )
+
     def test_interrupted_fork_returns_retryable_real_child_cleanup_handle(self):
         self.source.files.write("/tmp/cancel-marker", "saved")
         restore = adx.AdxBackend._restore_snapshot
