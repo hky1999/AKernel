@@ -113,7 +113,7 @@ ak template import-snapshot <snapshot-id> --name python-tools
 ak template list --name python-tools --limit 20
 ak template get <template-id>
 ak template start <template-id> --idle-timeout 600
-ak exec <returned-sandbox-id> 'cat /tmp/template-marker'
+ak exec <returned-sandbox-id> -- cat /tmp/template-marker
 ak delete <returned-sandbox-id>
 ak template delete <template-id>
 ```
