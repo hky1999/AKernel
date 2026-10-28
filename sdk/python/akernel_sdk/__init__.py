@@ -106,9 +106,23 @@ __all__ = [
     "DockerfileBuildError",
     "DockerfileParseError",
     "BuildInstruction",
+    "ComposeProject",
+    "ComposeOperationError",
+    "ServiceHandle",
+    "ServiceProcessHandle",
+    "DockerRuntime",
+    "ImageMountPlan",
+    "prepare_compose_images",
 ]
 
 _LAZY_IMPORTS = {
+    "ComposeProject": ("._compose", "ComposeProject"),
+    "ComposeOperationError": ("._compose", "ComposeOperationError"),
+    "ServiceHandle": ("._compose", "ServiceHandle"),
+    "ServiceProcessHandle": ("._service_process", "ServiceProcessHandle"),
+    "DockerRuntime": ("._docker_runtime", "DockerRuntime"),
+    "ImageMountPlan": ("._image_plan", "ImageMountPlan"),
+    "prepare_compose_images": ("._image_resolver", "prepare_compose_images"),
     "Client": ("._client", "Client"),
     "Sandbox": (".sandbox", "Sandbox"),
     "CommandHandle": (".commands", "CommandHandle"),
