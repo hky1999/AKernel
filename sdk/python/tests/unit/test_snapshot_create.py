@@ -113,9 +113,9 @@ class SnapshotCreateTest(unittest.TestCase):
                 Sandbox.create(**options)
         self.load.assert_not_called()
 
-    def test_restore_rejects_fresh_overrides_and_unknown_template_option(self):
+    def test_restore_rejects_fresh_overrides_and_ambiguous_template(self):
         for options in (
-            {"template": "label"},
+            {"snapshot_id": "saved", "template": "tpl-a"},
             {"snapshot_id": "saved", "cpu": 1000},
             {"snapshot_id": "saved", "dockerfile": object()},
         ):

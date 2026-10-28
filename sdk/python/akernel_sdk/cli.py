@@ -520,6 +520,55 @@ def handle_exec(instance_id: str, command: str | Sequence[str]) -> int:
             signal.signal(signal.SIGWINCH, previous_sigwinch)
 
 
+def handle_template(args) -> int:
+    """Use the same SDK connection and lifecycle contract as Python callers."""
+    from dataclasses import asdict
+
+    from ._templates import Template
+    from .sandbox import Sandbox
+
+    try:
+        if args.template_command == "import-snapshot":
+            item = Template.import_snapshot(
+                args.snapshot_id, name=args.name, template_id=args.template_id
+            )
+            print(json.dumps(asdict(item), ensure_ascii=False))
+        elif args.template_command == "get":
+            print(
+                json.dumps(asdict(Template.get(args.template_id)), ensure_ascii=False)
+            )
+        elif args.template_command == "list":
+            page = Template.list(
+                name=args.name, limit=args.limit, next_token=args.next_token
+            )
+            print(
+                json.dumps(
+                    {
+                        "items": [asdict(item) for item in page.next_items()],
+                        "next_token": page.next_token,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        elif args.template_command == "delete":
+            Template.delete(args.template_id)
+        elif args.template_command == "start":
+            sandbox = Sandbox.create(
+                template=args.template_id,
+                idle_timeout=args.idle_timeout,
+                timeout=args.timeout,
+                detached=True,
+            )
+            try:
+                print(sandbox.id)
+            finally:
+                sandbox.close()
+        return 0
+    except (RuntimeError, ValueError, TypeError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+
+
 def main():
     parser = argparse.ArgumentParser(prog="ak", description="AKernel SDK CLI")
     parser.add_argument(
@@ -569,6 +618,29 @@ def main():
         help="Instance IDs to delete (one or more)",
     )
 
+    template_parser = sub.add_parser(
+        "template", help="Manage reusable template registrations"
+    )
+    templates = template_parser.add_subparsers(dest="template_command", required=True)
+    importer = templates.add_parser(
+        "import-snapshot", help="Register and pin an existing snapshot"
+    )
+    importer.add_argument("snapshot_id")
+    importer.add_argument("--name", required=True)
+    importer.add_argument("--template-id", help="Stable ID for retry/reconciliation")
+    template_list = templates.add_parser(
+        "list", help="List one page of this tenant's templates"
+    )
+    template_list.add_argument("--name")
+    template_list.add_argument("--limit", type=int, default=100)
+    template_list.add_argument("--next-token")
+    for verb in ("get", "delete", "start"):
+        command = templates.add_parser(verb)
+        command.add_argument("template_id")
+        if verb == "start":
+            command.add_argument("--idle-timeout", type=int, default=300)
+            command.add_argument("--timeout", type=int)
+
     args = parser.parse_args()
 
     if args.ca_file:
@@ -596,6 +668,8 @@ def main():
         sys.exit(handle_exec(args.instance_id, cmd))
     elif args.command == "delete":
         handle_delete(args.instance_ids)
+    elif args.command == "template":
+        sys.exit(handle_template(args))
 
 
 if __name__ == "__main__":

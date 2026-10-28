@@ -655,3 +655,12 @@ class HttpReverseTunnel:
         """Return the loopback URL used by applications in the sandbox."""
 
         return f"http://127.0.0.1:{self.listen_port}"
+
+
+@dataclass(frozen=True)
+class TemplateInfo:
+    """Immutable template registration; name is a label, not a mutable alias."""
+
+    template_id: str
+    snapshot_id: str
+    name: str

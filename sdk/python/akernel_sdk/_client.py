@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 from ._addresses import _parse_endpoint, api_endpoint_from_env
 from ._backends.base import BackendConfig
 from ._backends.registry import new_backend
+from ._templates import Template
 from ._tls import verification_from_env
 from .sandbox import Sandbox
 
@@ -101,4 +102,8 @@ class Client:
             _bound_backend = backend
             _bound_gateway = gateway
 
+        class BoundTemplate(Template):
+            _bound_backend = backend
+
+        self.Template = BoundTemplate
         self.Sandbox = BoundSandbox

@@ -33,6 +33,7 @@ from ..types import (
     S3Config,
     SandboxInfo,
     SnapshotInfo,
+    TemplateInfo,
 )
 
 
@@ -106,6 +107,7 @@ class SnapshotRestoreSpec:
     xpu: str | None = None
     storage_mb: int | None = None
     inherit_entrypoint: bool = False
+    template_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -168,8 +170,6 @@ class CommandsDriver(Protocol):
     def connect(self, command: str | int) -> CommandReference: ...
 
     def command_id(self, pid: int) -> str | None: ...
-
-
 
 
 class FilesystemDriver(Protocol):
@@ -284,6 +284,20 @@ class Backend(Protocol):
     def create(self, spec: SandboxSpec) -> BackendSession: ...
 
     def from_snapshot(self, spec: SnapshotRestoreSpec) -> BackendSession: ...
+
+    def from_template(self, spec: SnapshotRestoreSpec) -> BackendSession: ...
+
+    def import_template(
+        self, snapshot_id: str, name: str, template_id: str
+    ) -> TemplateInfo: ...
+
+    def get_template(self, template_id: str) -> TemplateInfo: ...
+
+    def list_templates(
+        self, name: str | None, next_token: str | None, limit: int
+    ) -> tuple[list[TemplateInfo], str | None]: ...
+
+    def delete_template(self, template_id: str) -> None: ...
 
     def connect(self, spec: SandboxConnectSpec) -> BackendSession: ...
 

@@ -55,6 +55,7 @@ class BackendOperationError(RuntimeError):
         request_forwarded: bool | None = None,
         cleanup_errors: tuple[BaseException, ...] = (),
         command_id: str | None = None,
+        template_id: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -70,6 +71,7 @@ class BackendOperationError(RuntimeError):
         self.request_forwarded = request_forwarded
         self.cleanup_errors = cleanup_errors
         self.command_id = command_id
+        self.template_id = template_id
 
 
 class AuthenticationException(BackendOperationError):

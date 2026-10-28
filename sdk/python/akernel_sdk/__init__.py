@@ -49,6 +49,7 @@ from .types import (
     S3Config,
     SandboxInfo,
     SnapshotInfo,
+    TemplateInfo,
     TrafficPolicy,
 )
 
@@ -74,6 +75,9 @@ __all__ = [
     "SandboxInfo",
     "SnapshotInfo",
     "SnapshotPaginator",
+    "Template",
+    "TemplateInfo",
+    "TemplatePaginator",
     "NodeInfo",
     "Pty",
     "PtySession",
@@ -109,6 +113,8 @@ __all__ = [
 ]
 
 _LAZY_IMPORTS = {
+    "Template": ("._templates", "Template"),
+    "TemplatePaginator": ("._templates", "TemplatePaginator"),
     "Client": ("._client", "Client"),
     "Sandbox": (".sandbox", "Sandbox"),
     "CommandHandle": (".commands", "CommandHandle"),

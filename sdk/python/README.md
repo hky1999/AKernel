@@ -19,6 +19,7 @@ PTYs, port forwarding, and reverse tunnels.
   - [Port forwarding](#port-forwarding)
   - [Lifecycle compatibility](#lifecycle-compatibility)
   - [Reusable snapshots](#reusable-snapshots)
+  - [Environment templates](#environment-templates)
   - [Local failover and reload](#local-failover-and-reload)
   - [Reverse tunnels](#reverse-tunnels)
   - [Rootfs and mounts](#rootfs-and-mounts)
@@ -634,6 +635,18 @@ Custom user metadata and filtering, a running-lifetime deadline/set_timeout,
 live command-output callbacks, and per-command user selection are outside this
 API change. They require separately reviewed backend capabilities; the SDK does
 not emulate them with scheduler labels, idle timers or output replay.
+
+## Environment templates
+
+`Template.import_snapshot(snapshot_id, name=...)` registers and pins an existing
+reusable snapshot in the tenant's cluster catalog. `Template.list/get/delete`
+manage registrations, and `Sandbox.create(template=template_id)` or
+`Sandbox.from_template(template_id)` start independent sandboxes. Display names
+are labels, not mutable aliases. `Client(...).Template` uses that client's
+isolated connection. Requires a template-capable backend; an SDK update alone
+is insufficient. Existing constructors, `create(snapshot_id)` and `from_snapshot`
+retain their contracts. See [the template guide](docs/templates.md) for network
+policy, deletion, paging, CLI and service deployment requirements.
 
 ## Reusable snapshots
 

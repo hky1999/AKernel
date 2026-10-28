@@ -44,6 +44,7 @@ from ._sandboxes import SandboxPaginator, SandboxQuery
 from ._sandboxes import sandbox_id as _sandbox_id
 from ._snapshots import SnapshotPaginator, optional_name
 from ._snapshots import snapshot_id as _snapshot_id
+from ._templates import _template_id
 from .commands import CommandHandle, Commands
 from .filesystem import Filesystem
 from .pty import Pty
@@ -54,6 +55,7 @@ from .types import (
     S3Config,
     SandboxInfo,
     SnapshotInfo,
+    TemplateInfo,
 )
 
 logger = logging.getLogger(__name__)
@@ -534,13 +536,16 @@ class Sandbox:
             if pending is not None and isinstance(snapshot_id, str):
                 handles = tuple(
                     type(self)._session_handle(
-                        child, reverse_tunnel=self._reverse_tunnel,
-                        ports=sorted(self._forwarded_ports), detached=False,
+                        child,
+                        reverse_tunnel=self._reverse_tunnel,
+                        ports=sorted(self._forwarded_ports),
+                        detached=False,
                     )
                     for child in pending
                 )
                 retain_fork_failure(
-                    failure, snapshot_id=snapshot_id,
+                    failure,
+                    snapshot_id=snapshot_id,
                     pending_sandboxes=handles,
                 )
                 delattr(failure, "_fork_pending_sessions")
@@ -583,19 +588,25 @@ class Sandbox:
                     deleted = False
                     errors.append(error)
                 if deleted is not True:
-                    pending.append(type(self)._session_handle(
-                        child, reverse_tunnel=self._reverse_tunnel,
-                        ports=sorted(self._forwarded_ports), detached=False,
-                    ))
+                    pending.append(
+                        type(self)._session_handle(
+                            child,
+                            reverse_tunnel=self._reverse_tunnel,
+                            ports=sorted(self._forwarded_ports),
+                            detached=False,
+                        )
+                    )
             try:
                 type(self)._backend().delete_snapshot(outcome.snapshot_id)
             except BaseException as error:
                 errors.append(error)
             retain_fork_failure(
-                failure, snapshot_id=outcome.snapshot_id,
+                failure,
+                snapshot_id=outcome.snapshot_id,
                 created_environment_ids=tuple(child.id for child in children),
                 pending_environment_ids=tuple(child.id for child in pending),
-                pending_sandboxes=tuple(pending), cleanup_errors=tuple(errors),
+                pending_sandboxes=tuple(pending),
+                cleanup_errors=tuple(errors),
                 # Backend creation finished before public binding began. Keep
                 # even errors beyond the interrupted binding, plus earlier
                 # facade errors; retain_fork_failure deduplicates by identity.
@@ -613,7 +624,8 @@ class Sandbox:
             else:
                 cleanup_error = BackendOperationError(
                     "remote cleanup unconfirmed: ownership permits local closure only",
-                    code="CLEANUP_UNCONFIRMED", outcome="not_started",
+                    code="CLEANUP_UNCONFIRMED",
+                    outcome="not_started",
                     environment_id=retained_sandboxes[0].id,
                 )
             raise ForkCleanupError(
@@ -621,7 +633,8 @@ class Sandbox:
                 results,
                 cleanup_error,
                 pending_sandboxes=(
-                    *retained_sandboxes, *(child for child, _ in cleanup_failures)
+                    *retained_sandboxes,
+                    *(child for child, _ in cleanup_failures),
                 ),
                 child_cleanup_errors=tuple(error for _, error in cleanup_failures),
             ) from cleanup_error
@@ -750,6 +763,7 @@ class Sandbox:
         cls,
         snapshot_id: str | SnapshotInfo | None = None,
         *,
+        template: str | TemplateInfo | None = None,
         idle_timeout: int = 300,
         schedule_timeout: int = 30,
         timeout: int | None = None,
@@ -779,9 +793,13 @@ class Sandbox:
         With snapshot_id, this delegates to the compatible from_snapshot().
         timeout retains its existing logical creation-budget meaning; it does
         not set a maximum running lifetime.
-        Template aliases and foreign platform snapshot IDs are not resolved.
+        Use template= for registered AKernel template IDs. Display names and
+        foreign platform IDs are not resolved. The position argument remains
+        a snapshot ID.
         """
-        if snapshot_id is None:
+        if template is not None and snapshot_id is not None:
+            raise ValueError("template and snapshot_id are mutually exclusive")
+        if snapshot_id is None and template is None:
             return cls(
                 image=image,
                 rootfs=rootfs,
@@ -826,8 +844,14 @@ class Sandbox:
             raise ValueError(
                 "snapshot restore cannot override fresh image/resources/setup"
             )
-        return cls.from_snapshot(
-            snapshot_id,
+        identity = (
+            _template_id(template)
+            if template is not None
+            else _snapshot_id(snapshot_id if snapshot_id is not None else "")
+        )
+        restore = cls.from_template if template is not None else cls.from_snapshot
+        return restore(
+            identity,
             idle_timeout=idle_timeout,
             schedule_timeout=schedule_timeout,
             timeout=timeout,
@@ -878,6 +902,85 @@ class Sandbox:
         the transport may retry the same operation using a stable request ID.
         Client handles from the source must not be reused against the new sandbox.
         """
+        return cls._restore_checkpoint(
+            snapshot_id,
+            idle_timeout=idle_timeout,
+            schedule_timeout=schedule_timeout,
+            timeout=timeout,
+            name=name,
+            cwd=cwd,
+            port_forwardings=port_forwardings,
+            mounts=mounts,
+            reverse_tunnel=reverse_tunnel,
+            detached=detached,
+            failover=failover,
+            node_id=node_id,
+            network_policy=network_policy,
+        )
+
+    @classmethod
+    def from_template(
+        cls,
+        template: str | TemplateInfo,
+        *,
+        idle_timeout: int = 300,
+        schedule_timeout: int = 30,
+        timeout: int | None = None,
+        name: str | None = None,
+        cwd: str | None = None,
+        port_forwardings: Sequence[int] | None = None,
+        mounts: Sequence[Mount] | None = None,
+        reverse_tunnel: HttpReverseTunnel | None = None,
+        detached: bool = False,
+        failover: bool = False,
+        node_id: str | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> Sandbox:
+        """Start a new sandbox from a registered immutable template ID.
+
+        The service resolves and pins the snapshot during admission, reapplies
+        its captured network policy, and rejects creation-time policy overrides.
+        Names/foreign template IDs are not resolved. Requires a template-capable
+        backend; all restore lifecycle, cleanup and timeout contracts apply.
+        """
+        identity = _template_id(template)
+        return cls._restore_checkpoint(
+            identity,
+            _template_id=identity,
+            idle_timeout=idle_timeout,
+            schedule_timeout=schedule_timeout,
+            timeout=timeout,
+            name=name,
+            cwd=cwd,
+            port_forwardings=port_forwardings,
+            mounts=mounts,
+            reverse_tunnel=reverse_tunnel,
+            detached=detached,
+            failover=failover,
+            node_id=node_id,
+            network_policy=network_policy,
+        )
+
+    @classmethod
+    def _restore_checkpoint(
+        cls,
+        snapshot_id: str | SnapshotInfo,
+        *,
+        _template_id: str | None = None,
+        idle_timeout: int = 300,
+        schedule_timeout: int = 30,
+        timeout: int | None = None,
+        name: str | None = None,
+        cwd: str | None = None,
+        port_forwardings: Sequence[int] | None = None,
+        mounts: Sequence[Mount] | None = None,
+        reverse_tunnel: HttpReverseTunnel | None = None,
+        detached: bool = False,
+        failover: bool = False,
+        node_id: str | None = None,
+        network_policy: NetworkPolicy | None = None,
+    ) -> Sandbox:
+        """Shared validation and local binding for snapshot/template restores."""
         identity = _snapshot_id(snapshot_id)
         name = optional_name(name)
         _validate_integer("idle_timeout", idle_timeout, minimum=0)
@@ -908,6 +1011,7 @@ class Sandbox:
             raise ValueError("reverse tunnel ports conflict with port_forwardings")
         spec = SnapshotRestoreSpec(
             snapshot_id=identity,
+            template_id=_template_id,
             idle_timeout=idle_timeout,
             schedule_timeout=schedule_timeout,
             timeout=timeout,
@@ -922,7 +1026,11 @@ class Sandbox:
             network_policy=network_policy,
         )
         return cls._from_session(
-            cls._backend().from_snapshot(spec),
+            (
+                cls._backend().from_snapshot(spec)
+                if _template_id is None
+                else cls._backend().from_template(spec)
+            ),
             reverse_tunnel=reverse_tunnel,
             ports=ports,
             detached=detached,

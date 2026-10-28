@@ -472,7 +472,13 @@ stable public SDK interface. Reusable snapshots are a separate public contract:
 snapshot IDs. Preserve `Sandbox.from_snapshot()` as the compatible restore entry
 point with identical options, ownership and error semantics. Without a snapshot,
 `create(image=...)` and `create()` use fresh creation; existing constructors stay
-supported. Foreign template aliases are not resolved. Keep backend-native types and
+supported. Foreign template aliases are not resolved. Environment templates use a distinct
+`Template` catalog and explicit `Sandbox.create(template=...)` /
+`from_template()` APIs; keep the snapshot position argument compatible. Read
+`sdk/python/docs/templates.md` for the matching server capability, durable pins,
+network-policy reapplication, unknown import outcomes and unregister semantics.
+Template startup must preflight the capability so an older service cannot
+silently interpret its request as fresh creation. Keep backend-native types and
 lifecycle/connection work in `_backends`; restore must inherit captured resources
 and must not rerun fresh-boot setup.
 `sandbox.fork(count=N)` captures once and returns an ordered Sandbox/Exception

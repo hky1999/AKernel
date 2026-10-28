@@ -19,9 +19,11 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
+from urllib.parse import quote
 
 import adx_environment
 import httpx
@@ -44,6 +46,7 @@ from ..types import (
     PortRange,
     SandboxInfo,
     SnapshotInfo,
+    TemplateInfo,
     TrafficPolicy,
 )
 from .base import (
@@ -388,7 +391,8 @@ class _CommandsDriver:
     def _handle(self, command: str | int) -> Any:
         handle = (
             self._command_handles.get(command)
-            if isinstance(command, str) else self._handles.get(command)
+            if isinstance(command, str)
+            else self._handles.get(command)
         )
         if handle is None:
             raise NotFoundException(f"no connected command for {command!r}")
@@ -634,6 +638,11 @@ class _Session:
         self._network_policy_known = (
             not isinstance(spec, SandboxConnectSpec)
             and getattr(sandbox, "newly_created", False) is True
+            and not (
+                isinstance(spec, SnapshotRestoreSpec)
+                and spec.template_id is not None
+                and (spec.network_policy is None or spec.network_policy.is_empty)
+            )
         )
         self._fork_snapshot: _ForkSnapshotLease | None = None
 
@@ -782,7 +791,8 @@ class _Session:
                     and error.outcome == "not_started"
                 ):
                     lease = _ForkSnapshotLease(
-                        snapshot.snapshot_id, {child.id for child in children},
+                        snapshot.snapshot_id,
+                        {child.id for child in children},
                         self._connection,
                     )
                     for child in children:
@@ -824,7 +834,8 @@ class _Session:
                 pending.append(child)
                 errors.append(error)
                 logger.warning(
-                    "failed to clean interrupted fork child %s", child.id,
+                    "failed to clean interrupted fork child %s",
+                    child.id,
                     exc_info=True,
                 )
         try:
@@ -832,7 +843,8 @@ class _Session:
         except BaseException as error:
             errors.append(error)
         retain_fork_failure(
-            failure, snapshot_id=snapshot_id,
+            failure,
+            snapshot_id=snapshot_id,
             created_environment_ids=tuple(
                 child.id for child in (*children, *unreturned)
             ),
@@ -1045,7 +1057,10 @@ class _OwnedSandbox(adx_environment.Environment):
                     )
             if identity and not deleted:
                 _retain_pending_creation(
-                    error, self, kwargs.get("connection"), None,
+                    error,
+                    self,
+                    kwargs.get("connection"),
+                    None,
                     closed=getattr(self, "_closed", False) is True,
                 )
             raise
@@ -1071,6 +1086,40 @@ class _OwnedSandbox(adx_environment.Environment):
         # GC can run while HTTPX holds a non-reentrant pool lock. Network
         # deletion and transport closure belong to explicit session cleanup.
         pass
+
+
+class _TemplateSandbox(_OwnedSandbox):
+    """Reuse native restore/bootstrap; explicitly select the catalog wire field."""
+
+    def _create(self, body: dict[str, Any]) -> dict[str, Any]:
+        # Old services ignore unknown create fields. Fail before POST so that a
+        # template request can never accidentally become an ordinary fresh boot.
+        response = self._client._http.get(
+            f"{self._client._base}/capabilities", timeout=10
+        )
+        if response.status_code in (404, 405, 501):
+            raise UnsupportedBackendFeatureError(
+                "The service does not support environment templates"
+            )
+        if response.status_code >= 400:
+            raise self._client._http_error(response)
+        try:
+            capabilities = response.json()
+        except ValueError as error:
+            raise UnsupportedBackendFeatureError(
+                "Invalid environment template capabilities response"
+            ) from error
+        if (
+            not isinstance(capabilities, dict)
+            or not isinstance(capabilities.get("capabilities"), list)
+            or "environment-templates-v1" not in capabilities["capabilities"]
+        ):
+            raise UnsupportedBackendFeatureError(
+                "The service does not support environment templates"
+            )
+        body = dict(body)
+        body["templateId"] = body.pop("snapshotId")
+        return super()._create(body)
 
 
 def _rollback_created(
@@ -1109,15 +1158,21 @@ def _rollback_created(
 
 
 def _retain_pending_creation(
-    failure: BaseException, sandbox: Any, connection: Any,
-    session: BackendSession | None, *, closed: bool,
+    failure: BaseException,
+    sandbox: Any,
+    connection: Any,
+    session: BackendSession | None,
+    *,
+    closed: bool,
 ) -> None:
     """Keep a known bootstrap resource without inferring ownership from errors."""
     context: Any = failure
     pending = tuple(getattr(failure, "_fork_pending_sessions", ()))
     if all(child.id != str(sandbox.id) for child in pending):
-        handle = session if session is not None else _Session._cleanup_handle(
-            sandbox, connection, closed=closed
+        handle = (
+            session
+            if session is not None
+            else _Session._cleanup_handle(sandbox, connection, closed=closed)
         )
         context._fork_pending_sessions = (*pending, handle)
 
@@ -1414,6 +1469,9 @@ class AdxBackend:
     def from_snapshot(self, spec: SnapshotRestoreSpec) -> BackendSession:
         return self._restore_snapshot(spec, self._connection)
 
+    def from_template(self, spec: SnapshotRestoreSpec) -> BackendSession:
+        return self._restore_snapshot(spec, self._connection)
+
     @staticmethod
     def _restore_snapshot(spec: SnapshotRestoreSpec, connection: Any) -> BackendSession:
         _validate_restore_timeout(spec.schedule_timeout, spec.timeout)
@@ -1424,7 +1482,10 @@ class AdxBackend:
             )
         started = time.monotonic()
         try:
-            sandbox = _OwnedSandbox.create(
+            factory = (
+                _TemplateSandbox if spec.template_id is not None else _OwnedSandbox
+            )
+            sandbox = factory.create(
                 spec.snapshot_id,
                 idle_timeout=spec.idle_timeout,
                 schedule_timeout=spec.schedule_timeout,
@@ -1449,7 +1510,7 @@ class AdxBackend:
                     port_forward_mode="tls",
                 ),
                 connection=connection,
-                )
+            )
         except UnsupportedBackendFeatureError:
             raise
         except Exception as error:
@@ -1514,6 +1575,95 @@ class AdxBackend:
             if getattr(error, "status_code", None) == 404:
                 return
             raise _convert_error("delete snapshot", error) from error
+
+    def _template_request(
+        self,
+        method: str,
+        identity: str | None = None,
+        *,
+        body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        client = EnvironmentClient(connection=self._connection)
+        try:
+            suffix = "" if identity is None else "/" + quote(identity, safe="")
+            response = client._http.request(
+                method,
+                f"{client._base}/templates{suffix}",
+                json=body,
+                params=params,
+                headers={"X-ADX-Request-ID": f"template-{uuid.uuid4()}"},
+                timeout=60 + self._connection.communication_margin_seconds,
+            )
+            return client._json(response)
+        except Exception as error:
+            raise _convert_error("template catalog request", error) from error
+        finally:
+            client.close()
+
+    @staticmethod
+    def _template_info(row: dict[str, Any]) -> TemplateInfo:
+        if row.get("status") != "ready" or any(
+            not isinstance(row.get(key), str) or not row[key]
+            for key in ("templateId", "snapshotId", "name")
+        ):
+            raise BackendOperationError("invalid template catalog entry")
+        return TemplateInfo(row["templateId"], row["snapshotId"], row["name"])
+
+    def import_template(
+        self, snapshot_id: str, name: str, template_id: str
+    ) -> TemplateInfo:
+        try:
+            info = self._template_info(
+                self._template_request(
+                    "POST",
+                    body={
+                        "templateId": template_id,
+                        "snapshotId": snapshot_id,
+                        "name": name,
+                    },
+                )
+            )
+            if (
+                info.template_id != template_id
+                or info.snapshot_id != snapshot_id
+                or info.name != name
+            ):
+                raise BackendOperationError("template publication identity mismatch")
+            return info
+        except BackendOperationError as error:
+            error.template_id = template_id
+            raise
+
+    def get_template(self, template_id: str) -> TemplateInfo:
+        info = self._template_info(self._template_request("GET", template_id))
+        if info.template_id != template_id:
+            raise BackendOperationError("template lookup identity mismatch")
+        return info
+
+    def list_templates(
+        self, name: str | None, next_token: str | None, limit: int
+    ) -> tuple[list[TemplateInfo], str | None]:
+        params: dict[str, Any] = {"pageSize": limit}
+        if name is not None:
+            params["name"] = name
+        if next_token is not None:
+            params["pageToken"] = next_token
+        page = self._template_request("GET", params=params)
+        rows, cursor = page.get("items"), page.get("nextPageToken")
+        if (
+            not isinstance(rows, list)
+            or not isinstance(cursor, str)
+            or any(not isinstance(row, dict) for row in rows)
+        ):
+            raise BackendOperationError("invalid template catalog page")
+        return [self._template_info(row) for row in rows], cursor or None
+
+    def delete_template(self, template_id: str) -> None:
+        try:
+            self._template_request("DELETE", template_id)
+        except NotFoundException:
+            return
 
     def delete_named(self, name: str) -> None:
         sandbox_id = f"{self.namespace}-{name}"
