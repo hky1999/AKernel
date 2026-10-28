@@ -17,13 +17,20 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import adx_environment
+import httpx
+from adx_environment._transport import EnvironmentClient, EnvironmentNotFound
+from adx_environment.commands import CommandNotFound as NativeCommandNotFound
+from adx_environment.tunnel_client import TunnelClient
 
+from .._fork import ForkCleanupError
+from .._sandboxes import SandboxQuery
 from ..types import (
     CommandInfo,
     CommandResult,
@@ -35,6 +42,7 @@ from ..types import (
     NetworkRule,
     PortRange,
     SandboxInfo,
+    SnapshotInfo,
     TrafficPolicy,
 )
 from .base import (
@@ -42,13 +50,92 @@ from .base import (
     BackendConfig,
     BackendSession,
     Capability,
+    ForkOutcome,
+    SandboxConnectSpec,
     SandboxSpec,
+    SnapshotRestoreSpec,
 )
-from .errors import BackendOperationError, UnsupportedBackendFeatureError
+from .errors import (
+    AuthenticationException,
+    BackendOperationError,
+    NotFoundException,
+    PermissionDeniedException,
+    RateLimitException,
+    SandboxNotFoundException,
+    ServiceBusyException,
+    TimeoutException,
+    UnsupportedBackendFeatureError,
+    retain_failure_context,
+)
 
 _NAMESPACE = "default"
 _DEFAULT_LISTEN_PORT = 8766
+# Pinned ADX reserves 30s for initialization and 30s for create handoff. Below
+# this reserve it either rejects the budget or silently increases it.
+_CREATE_RESERVE_SECONDS = 60
 logger = logging.getLogger(__name__)
+
+
+def _directory_info(row: Mapping[str, Any]) -> SandboxInfo:
+    identity = row.get("id")
+    state = row.get("status")
+    if not isinstance(identity, str) or not identity or not isinstance(state, str):
+        raise BackendOperationError("invalid sandbox directory entry")
+    return SandboxInfo(
+        id=identity,
+        state=state,
+        cpu=row.get("required_cpu"),
+        memory=row.get("required_mem"),
+        image=row.get("image") or None,
+    )
+
+
+def _bind_tunnel(sandbox: Any, tunnel: Any, connection: Any) -> None:
+    if tunnel is None:
+        return
+    gateway = connection.gateway_address or connection.server_address
+    tls = connection.gateway_use_tls
+    scheme = "wss" if tls else "ws"
+    safe_id = sandbox._client._safe_id(sandbox.id)
+    client = TunnelClient(
+        tunnel.target,
+        token=connection.resolved_token() if tls else None,
+        environment_id=sandbox.id,
+    )
+    sandbox._tunnel_client = client
+    sandbox._upstream = tunnel.target
+    sandbox._tunnel_url = f"http://127.0.0.1:{tunnel.listen_port}"
+    try:
+        if not client.start(
+            f"{scheme}://{gateway}/tunnel/{safe_id}", timeout=tunnel.connect_timeout
+        ):
+            raise BackendOperationError(
+                "reverse tunnel did not become ready", environment_id=sandbox.id
+            )
+    except BaseException as failure:
+        try:
+            client.stop()
+        except Exception as cleanup:
+            retain_failure_context(failure, sandbox.id, cleanup)
+        else:
+            sandbox._tunnel_client = None
+        raise
+
+
+def _unbind_tunnel(sandbox: Any) -> None:
+    tunnel = getattr(sandbox, "_tunnel_client", None)
+    if tunnel is not None:
+        tunnel.stop()
+        sandbox._tunnel_client = None
+
+
+def _validate_restore_timeout(schedule_timeout: int, timeout: int) -> None:
+    minimum = schedule_timeout + _CREATE_RESERVE_SECONDS
+    if timeout < minimum:
+        raise ValueError(
+            "restore timeout must be at least schedule_timeout + 60 seconds "
+            f"({minimum} seconds for this source)"
+        )
 
 
 @dataclass(frozen=True)
@@ -171,7 +258,35 @@ def _native_network_policy(policy: NetworkPolicy) -> Any:
 
 
 def _convert_error(operation: str, error: Exception) -> BackendOperationError:
-    return BackendOperationError(
+    status = getattr(error, "status_code", None)
+    error_type: type[BackendOperationError] = {
+        401: AuthenticationException,
+        403: PermissionDeniedException,
+        404: NotFoundException,
+        429: RateLimitException,
+        503: ServiceBusyException,
+    }.get(status if isinstance(status, int) else 0, BackendOperationError)
+    if isinstance(error, EnvironmentNotFound):
+        error_type = SandboxNotFoundException
+    elif isinstance(error, NativeCommandNotFound):
+        error_type = NotFoundException
+    elif isinstance(
+        error,
+        (
+            AuthenticationException,
+            PermissionDeniedException,
+            NotFoundException,
+            TimeoutException,
+            RateLimitException,
+            ServiceBusyException,
+        ),
+    ):
+        error_type = type(error)
+    elif getattr(error, "code", None) in {"COMMAND_NOT_FOUND", "COMMAND_EXPIRED"}:
+        error_type = NotFoundException
+    elif isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        error_type = TimeoutException
+    return error_type(
         f"{operation} failed: {error}",
         code=getattr(error, "code", None),
         retry=getattr(error, "retry", None),
@@ -184,6 +299,8 @@ def _convert_error(operation: str, error: Exception) -> BackendOperationError:
         failure=getattr(error, "failure", None),
         probe_failure=getattr(error, "probe_failure", None),
         request_forwarded=getattr(error, "request_forwarded", None),
+        cleanup_errors=getattr(error, "cleanup_errors", ()) or (),
+        command_id=getattr(error, "command_id", None),
     )
 
 
@@ -192,10 +309,9 @@ def _route_read_retryable(error: Exception) -> bool:
     for _ in range(4):
         if cause is None:
             break
-        if (
-            isinstance(cause, adx_environment.EnvironmentError)
-            and getattr(cause, "status_code", None) in (409, 503)
-        ):
+        if isinstance(cause, adx_environment.EnvironmentError) and getattr(
+            cause, "status_code", None
+        ) in (409, 503):
             return getattr(cause, "retry", None) != "never"
         cause = cause.__cause__
     return False
@@ -236,6 +352,7 @@ def _command_info(value: Any) -> CommandInfo:
         pid=int(value.pid),
         command=str(value.command),
         running=bool(value.running),
+        command_id=value.id if isinstance(getattr(value, "id", None), str) else None,
     )
 
 
@@ -254,6 +371,29 @@ class _CommandsDriver:
     def __init__(self, commands: Any) -> None:
         self._commands = commands
         self._handles: dict[int, Any] = {}
+
+    def command_id(self, pid: int) -> str | None:
+        value = getattr(self._handles.get(pid), "id", None)
+        return value if isinstance(value, str) else None
+
+    def connect(self, command: str | int) -> int:
+        try:
+            identity = command
+            if isinstance(command, int):
+                records = [row for row in self._commands.list() if row.pid == command]
+                if len(records) != 1:
+                    raise NotFoundException(
+                        f"no unique tracked command for pid {command}"
+                    )
+                identity = records[0].id
+            handle = self._commands.get(identity)
+            pid = handle.pid
+            if pid is None or pid <= 0:
+                raise BackendOperationError("connected command has no assigned PID")
+            self._handles[int(pid)] = handle
+            return int(pid)
+        except Exception as error:
+            raise _convert_error("connect command", error) from error
 
     def run(
         self,
@@ -295,9 +435,25 @@ class _CommandsDriver:
                 cwd=cwd,
                 stdin=stdin,
             )
+            # A successful submission may precede PID assignment. Resolve the
+            # stable command ID with reads, never submit the command twice.
+            pid = handle.pid
+            deadline = time.monotonic() + 10
+            while pid is None:
+                values = self._commands.list()
+                row = next((v for v in values if v.id == handle.id), None)
+                pid = row.pid if row is not None else None
+                if pid is None:
+                    if time.monotonic() >= deadline:
+                        raise BackendOperationError(
+                            "submitted command has no PID; it was not resubmitted",
+                            outcome="unknown",
+                            operation_id=str(handle.id),
+                        )
+                    time.sleep(0.1)
+            pid = int(pid)
         except Exception as error:
             raise _convert_error("background command start", error) from error
-        pid = int(handle.pid)
         self._handles[pid] = handle
         return pid
 
@@ -324,7 +480,11 @@ class _CommandsDriver:
 
     def list(self) -> list[CommandInfo]:
         try:
-            return [_command_info(value) for value in self._commands.list()]
+            return [
+                _command_info(value)
+                for value in self._commands.list()
+                if value.pid is not None
+            ]
         except Exception as error:
             raise _convert_error("list processes", error) from error
 
@@ -400,11 +560,38 @@ class _FilesystemDriver:
             ) from error
 
 
+class _ForkSnapshotLease:
+    """Keep a busy fork snapshot until all locally owned children are deleted.
+
+    Only an authoritative SNAPSHOT_IN_USE/not_started response selects this
+    path. close() never releases a live remote child's reference. No background
+    timers or garbage-collection callbacks perform remote deletion.
+    """
+
+    def __init__(self, snapshot_id: str, children: set[str], connection: Any) -> None:
+        self.snapshot_id = snapshot_id
+        self._children = children
+        self._connection = connection
+        self._deleted = False
+        self._lock = threading.Lock()
+
+    def release(self, identity: str) -> None:
+        with self._lock:
+            self._children.discard(identity)
+            if self._children or self._deleted:
+                return
+            try:
+                AdxBackend._delete_snapshot(self.snapshot_id, self._connection)
+            except Exception as error:
+                raise ForkCleanupError(self.snapshot_id, [], error) from error
+            self._deleted = True
+
+
 class _Session:
     def __init__(
         self,
         sandbox: Any,
-        spec: SandboxSpec,
+        spec: SandboxSpec | SnapshotRestoreSpec | SandboxConnectSpec,
         connection: Any,
     ) -> None:
         self.id = str(sandbox.id)
@@ -418,6 +605,13 @@ class _Session:
         self._connection = connection
         self._terminated = False
         self._closed = False
+        self._network_policy = spec.network_policy
+        self._network_policy_known = not isinstance(spec, SandboxConnectSpec)
+        self._fork_snapshot: _ForkSnapshotLease | None = None
+
+    @property
+    def fork_snapshot_id(self) -> str | None:
+        return None if self._fork_snapshot is None else self._fork_snapshot.snapshot_id
 
     def is_running(self) -> bool:
         if self._terminated or self._closed:
@@ -440,6 +634,139 @@ class _Session:
             xpu=self._spec.xpu,
             storage_mb=self._spec.storage_mb,
         )
+
+    def pause(self, timeout: int) -> bool:
+        if self._closed or self._terminated:
+            raise RuntimeError("cannot pause a closed sandbox")
+        if self.get_info().state == "paused":
+            return False
+        # Stop retries before pausing: a reconnecting tunnel can demand-resume
+        # the environment immediately after the pause commits.
+        try:
+            _unbind_tunnel(self._sandbox)
+            self._sandbox.pause(
+                timeout_seconds=timeout,
+                retention=adx_environment.RetentionPolicy.forever(),
+            )
+        except BaseException as error:
+            try:
+                if (
+                    getattr(self._sandbox, "_tunnel_client", None) is None
+                    and self.get_info().state == "running"
+                ):
+                    _bind_tunnel(
+                        self._sandbox, self._spec.reverse_tunnel, self._connection
+                    )
+            except Exception as cleanup:
+                retain_failure_context(error, self.id, cleanup)
+            if isinstance(error, Exception):
+                raise _convert_error("pause sandbox", error) from error
+            raise
+        return True
+
+    def create_snapshot(self, name: str | None, timeout: int) -> SnapshotInfo:
+        try:
+            value = self._sandbox.create_snapshot(name=name, timeout_seconds=timeout)
+            return SnapshotInfo(str(value.snapshot_id), tuple(value.names))
+        except Exception as error:
+            raise _convert_error("create snapshot", error) from error
+
+    def fork(
+        self,
+        count: int,
+        idle_timeout: int | None,
+        snapshot_timeout: int,
+        restore_timeout: int | None,
+    ) -> ForkOutcome:
+        if self._terminated or self._closed:
+            raise BackendOperationError("fork failed: sandbox is closed")
+        if not self._network_policy_known:
+            raise BackendOperationError(
+                "fork requires a confirmed source network policy; reapply it first",
+                code="NETWORK_POLICY_UNCONFIRMED",
+                outcome="not_started",
+                environment_id=self.id,
+            )
+        timeout = (
+            self._spec.schedule_timeout + _CREATE_RESERVE_SECONDS
+            if restore_timeout is None
+            else restore_timeout
+        )
+        _validate_restore_timeout(self._spec.schedule_timeout, timeout)
+        # The pinned ADX API has snapshot/create/delete primitives, not a batch
+        # fork route. Capture once and keep the snapshot until all creates settle.
+        snapshot = self.create_snapshot(None, snapshot_timeout)
+        results: list[BackendSession | Exception] = []
+        cleanup_error: Exception | None = None
+        interrupted = False
+        try:
+            spec = SnapshotRestoreSpec(
+                snapshot_id=snapshot.snapshot_id,
+                idle_timeout=(
+                    self._spec.idle_timeout if idle_timeout is None else idle_timeout
+                ),
+                schedule_timeout=self._spec.schedule_timeout,
+                timeout=timeout,
+                name=None,
+                command_cwd=self._spec.command_cwd,
+                port_forwardings=self._spec.port_forwardings,
+                mounts=self._spec.mounts,
+                reverse_tunnel=self._spec.reverse_tunnel,
+                detached=False,
+                failover=self._spec.failover,
+                node_id=None,
+                # ADX restores resources but not execution network policy.
+                # Send the last acknowledged policy atomically with creation.
+                network_policy=self._network_policy,
+            )
+            for _ in range(count):
+                try:
+                    results.append(AdxBackend._restore_snapshot(spec, self._connection))
+                except Exception as error:
+                    results.append(error)
+        except BaseException:
+            interrupted = True
+            # No result handles reach the caller on interruption. Release only
+            # children whose identities are known; never touch the source.
+            for child in results:
+                if not isinstance(child, Exception):
+                    try:
+                        child.terminate()
+                    except Exception:
+                        logger.warning(
+                            "failed to clean interrupted fork child %s",
+                            child.id,
+                            exc_info=True,
+                        )
+            raise
+        finally:
+            try:
+                AdxBackend._delete_snapshot(snapshot.snapshot_id, self._connection)
+            except Exception as error:
+                children = [
+                    child for child in results if not isinstance(child, Exception)
+                ]
+                if (
+                    not interrupted
+                    and children
+                    and isinstance(error, BackendOperationError)
+                    and error.code == "SNAPSHOT_IN_USE"
+                    and error.outcome == "not_started"
+                ):
+                    lease = _ForkSnapshotLease(
+                        snapshot.snapshot_id, {child.id for child in children},
+                        self._connection,
+                    )
+                    for child in children:
+                        cast(_Session, child)._fork_snapshot = lease
+                else:
+                    cleanup_error = error
+                    logger.warning(
+                        "fork snapshot %s needs explicit cleanup",
+                        snapshot.snapshot_id,
+                        exc_info=True,
+                    )
+        return ForkOutcome(snapshot.snapshot_id, results, cleanup_error)
 
     def reload(self) -> bool:
         if self._terminated or self._closed:
@@ -515,8 +842,16 @@ class _Session:
         native_policy = None if policy is None else _native_network_policy(policy)
         try:
             update(native_policy)
-        except Exception as error:
-            raise _convert_error("update network policy", error) from error
+        except BaseException as error:
+            # A failed response/reconnect can follow a committed replacement.
+            # Require an explicit successful reapply before deriving children.
+            self._network_policy_known = False
+            if isinstance(error, Exception):
+                raise _convert_error("update network policy", error) from error
+            retain_failure_context(error, self.id)
+            raise
+        self._network_policy = policy
+        self._network_policy_known = True
 
     def rollback_creation(self) -> None:
         """Delete only a confirmed new instance after initialization fails."""
@@ -527,6 +862,8 @@ class _Session:
 
     def terminate(self) -> None:
         if self._terminated:
+            if self._fork_snapshot is not None:
+                self._fork_snapshot.release(self.id)
             return
         # Release the native handle before deleting the remote sandbox. This
         # lets transports such as reverse tunnels close while their routes are
@@ -540,14 +877,18 @@ class _Session:
         try:
             adx_environment.Environment.delete(self.id, connection=self._connection)
         except Exception as error:
+            failure = _convert_error("terminate sandbox", error)
+            retain_failure_context(failure, self.id, close_error)
             if close_error is not None:
                 logger.warning(
                     "Local cleanup also failed for sandbox %s: %s",
                     self.id,
                     close_error,
                 )
-            raise _convert_error("terminate sandbox", error) from error
+            raise failure from error
         self._terminated = True
+        if self._fork_snapshot is not None:
+            self._fork_snapshot.release(self.id)
         if close_error is not None:
             raise close_error
 
@@ -568,6 +909,7 @@ class _ConstructionClient:
     def __init__(self, client: Any, newly_created: bool) -> None:
         self.client = client
         self.newly_created = newly_created
+        self.deleted = False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.client, name)
@@ -575,6 +917,7 @@ class _ConstructionClient:
     def delete(self, environment_id: str) -> None:
         if self.newly_created:
             self.client.delete(environment_id)
+            self.deleted = True
 
 
 class _OwnedSandbox(adx_environment.Environment):
@@ -582,13 +925,48 @@ class _OwnedSandbox(adx_environment.Environment):
 
     _client: Any
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._newly_created = False
         try:
-            super().__init__(**kwargs)
+            super().__init__(*args, **kwargs)
+        except BaseException as error:
+            # Released native SDK catches Exception only, and can lose a known ID
+            # when tunnel bootstrap fails. Retain ownership until construction
+            # returns, including Ctrl+C before a _Session exists.
+            identity = getattr(self, "_sid", "")
+            if identity:
+                retain_failure_context(error, identity)
+            client = getattr(self, "_client", None)
+            if client is not None:
+                try:
+                    if not getattr(self, "_closed", False):
+                        self.close()
+                except Exception as cleanup_error:
+                    if identity:
+                        retain_failure_context(error, identity, cleanup_error)
+                try:
+                    client.close()
+                except Exception as cleanup_error:
+                    if identity:
+                        retain_failure_context(error, identity, cleanup_error)
+            deleted = isinstance(client, _ConstructionClient) and client.deleted
+            if identity and self._newly_created and not deleted:
+                try:
+                    # A fresh client makes rollback retryable even if native
+                    # construction already closed its transport after failure.
+                    adx_environment.Environment.delete(
+                        identity, connection=kwargs.get("connection")
+                    )
+                except Exception as cleanup_error:
+                    retain_failure_context(error, identity, cleanup_error)
+                    logger.warning(
+                        "failed to roll back constructing sandbox %s",
+                        identity,
+                        exc_info=True,
+                    )
+            raise
         finally:
-            # The index dependency may predate native ownership-aware rollback.
-            # Scope the guard to construction; explicit deletion stays unchanged.
+            # Guard constructor rollback on reused or unconfirmed identities.
             if isinstance(getattr(self, "_client", None), _ConstructionClient):
                 self._client = self._client.client
 
@@ -602,10 +980,43 @@ class _OwnedSandbox(adx_environment.Environment):
     def newly_created(self) -> bool:
         return self._newly_created
 
+    def get_info(self) -> SandboxInfo:
+        return _directory_info(self._client.environment_info(self.id))
+
     def __del__(self) -> None:
         # GC can run while HTTPX holds a non-reentrant pool lock. Network
         # deletion and transport closure belong to explicit session cleanup.
         pass
+
+
+def _rollback_created(
+    failure: BaseException,
+    sandbox: Any,
+    connection: Any,
+    session: BackendSession | None,
+) -> None:
+    """Rollback a known create without replacing its original failure."""
+    identity = str(sandbox.id)
+    retain_failure_context(failure, identity)
+    if session is not None:
+        try:
+            session.rollback_creation()
+        except Exception as cleanup_error:
+            retain_failure_context(failure, identity, cleanup_error)
+            logger.warning("failed to clean up sandbox %s", identity, exc_info=True)
+        return
+    for cleanup in (
+        sandbox.close,
+        lambda: (
+            adx_environment.Environment.delete(identity, connection=connection)
+            if sandbox.newly_created is True else None
+        ),
+    ):
+        try:
+            cleanup()
+        except Exception as cleanup_error:
+            retain_failure_context(failure, identity, cleanup_error)
+            logger.warning("failed to clean up sandbox %s", identity, exc_info=True)
 
 
 class AdxBackend:
@@ -637,6 +1048,158 @@ class AdxBackend:
             instance_id, connection=_control_pty_connection(self._connection)
         )
 
+    def get_sandbox(self, sandbox_id: str) -> SandboxInfo:
+        client = EnvironmentClient(connection=self._connection)
+        try:
+            return _directory_info(client.environment_info(sandbox_id))
+        except Exception as error:
+            raise _convert_error("get sandbox info", error) from error
+        finally:
+            client.close()
+
+    def delete_sandbox(self, sandbox_id: str) -> bool:
+        client = EnvironmentClient(connection=self._connection)
+        try:
+            try:
+                client.environment_info(sandbox_id)
+            except adx_environment.EnvironmentError as error:
+                if getattr(error, "status_code", None) == 404 or isinstance(
+                    error, EnvironmentNotFound
+                ):
+                    return False
+                raise
+            client.delete(sandbox_id)
+            return True
+        except Exception as error:
+            raise _convert_error("delete sandbox", error) from error
+        finally:
+            client.close()
+
+    def list_sandboxes(
+        self, query: SandboxQuery, next_token: str | None, limit: int
+    ) -> tuple[list[SandboxInfo], str | None]:
+        client = EnvironmentClient(connection=self._connection)
+        items: list[SandboxInfo] = []
+        token = next_token
+        seen: set[str] = set()
+        try:
+            while len(items) < limit:
+                params: dict[str, Any] = {"pageSize": limit - len(items)}
+                if token is not None:
+                    params["pageToken"] = token
+                response = client._http.get(
+                    f"{client._origin}/api/instances", params=params, timeout=60
+                )
+                if response.status_code >= 400:
+                    raise client._http_error(response)
+                data = response.json()
+                rows: Any
+                if isinstance(data, list):
+                    rows, following = data, None
+                    if len(rows) > params["pageSize"]:
+                        raise UnsupportedBackendFeatureError(
+                            "this directory version does not support bounded pagination"
+                        )
+                elif isinstance(data, dict):
+                    rows = data.get("items")
+                    following = data.get("nextPageToken") or None
+                else:
+                    raise BackendOperationError("invalid sandbox directory response")
+                if not isinstance(rows, list) or (
+                    following is not None and not isinstance(following, str)
+                ):
+                    raise BackendOperationError("invalid sandbox directory page")
+                if len(rows) > params["pageSize"]:
+                    raise BackendOperationError(
+                        "directory exceeded requested page size"
+                    )
+                for row in rows:
+                    if not isinstance(row, dict):
+                        raise BackendOperationError("invalid sandbox directory entry")
+                    info = _directory_info(row)
+                    if info.state in (query.state or ()):
+                        items.append(info)
+                if following is None:
+                    return items, None
+                if following == token or following in seen:
+                    raise BackendOperationError(
+                        "non-advancing sandbox directory cursor"
+                    )
+                seen.add(following)
+                token = following
+            return items, token
+        except UnsupportedBackendFeatureError:
+            raise
+        except Exception as error:
+            raise _convert_error("list sandboxes", error) from error
+        finally:
+            client.close()
+
+    def connect(self, spec: SandboxConnectSpec) -> BackendSession:
+        tunnel = spec.reverse_tunnel
+        if tunnel is not None and tunnel.reverse_port != tunnel.listen_port - 1:
+            raise UnsupportedBackendFeatureError(
+                "Backend 'adx' requires reverse_port to equal listen_port - 1."
+            )
+        client = EnvironmentClient(connection=self._connection)
+        deadline = time.monotonic() + spec.timeout
+        resumed = False
+        try:
+            while True:
+                info = client.environment_info(
+                    spec.environment_id, timeout=max(0.1, deadline - time.monotonic())
+                )
+                state = info.get("status")
+                if state == "running":
+                    break
+                if state == "paused" and not resumed:
+                    client.resume(spec.environment_id)
+                    resumed = True
+                elif state not in {"pausing", "resuming", "paused"}:
+                    raise BackendOperationError(
+                        f"cannot connect to sandbox in state {state}",
+                        environment_id=spec.environment_id,
+                        outcome="not_started",
+                    )
+                if time.monotonic() >= deadline:
+                    raise BackendOperationError(
+                        "sandbox connect timed out", environment_id=spec.environment_id
+                    )
+                time.sleep(0.1)
+        except Exception as error:
+            raise _convert_error("connect sandbox", error) from error
+        finally:
+            client.close()
+        sandbox = None
+        try:
+            sandbox = _OwnedSandbox.from_id(
+                spec.environment_id, connection=self._connection
+            )
+            sandbox._cwd = spec.command_cwd
+            sandbox.commands._default_cwd = spec.command_cwd
+            sandbox._forwarded_ports = set(spec.port_forwardings)
+            session = _Session(sandbox, spec, self._connection)
+            while True:
+                try:
+                    session.commands.list()
+                    break
+                except BackendOperationError as error:
+                    if not _route_read_retryable(error) or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.1)
+            _bind_tunnel(sandbox, tunnel, self._connection)
+            return session
+        except BaseException as error:
+            retain_failure_context(error, spec.environment_id)
+            if sandbox is not None:
+                try:
+                    sandbox.close()
+                except Exception as cleanup:
+                    retain_failure_context(error, spec.environment_id, cleanup)
+            if isinstance(error, Exception):
+                raise _convert_error("connect sandbox", error) from error
+            raise
+
     def _validate(self, spec: SandboxSpec) -> None:
         tunnel = spec.reverse_tunnel
         if tunnel is not None and tunnel.reverse_port != tunnel.listen_port - 1:
@@ -660,7 +1223,7 @@ class AdxBackend:
         if spec.network_policy is not None:
             network = _native_network_policy(spec.network_policy)
         mounts = [_native_mount(mount) for mount in spec.mounts]
-        create_timeout = spec.schedule_timeout + 60
+        create_timeout = spec.create_timeout or spec.schedule_timeout + 60
         create_args = dict(
             image=spec.image,
             rootfs=rootfs,
@@ -707,10 +1270,13 @@ class AdxBackend:
         )
         try:
             sandbox = _OwnedSandbox(**create_args)
+        except UnsupportedBackendFeatureError:
+            raise
         except Exception as error:
             raise _convert_error("create sandbox", error) from error
-        session = _Session(sandbox, spec, self._connection)
+        session = None
         try:
+            session = _Session(sandbox, spec, self._connection)
             # Creation is authoritative before Edge necessarily applies the
             # next route-stream delta. A read-only direct operation closes
             # that gap so the first caller operation does not observe 503.
@@ -725,33 +1291,126 @@ class AdxBackend:
                         raise
                     time.sleep(min(retry_delay, max(0, deadline - time.monotonic())))
                     retry_delay = min(retry_delay * 2, 1.0)
-        except Exception:
-            try:
-                session.rollback_creation()
-            except Exception:
-                logger.warning(
-                    "failed to clean up sandbox after direct route readiness failure",
-                    exc_info=True,
-                )
+        except BaseException as error:
+            _rollback_created(error, sandbox, self._connection, session)
             raise
         if spec.command_cwd is not None:
             try:
                 # The public constructor creates its working directory; the
                 # native SDK only uses cwd as a command default.
                 sandbox.files.make_dir(spec.command_cwd)
-            except Exception as error:
-                try:
-                    session.rollback_creation()
-                except Exception:
-                    logger.warning(
-                        "Failed to roll back sandbox %s after cwd initialization",
-                        session.id,
-                        exc_info=True,
-                    )
-                raise _convert_error(
-                    f"initialize sandbox cwd {spec.command_cwd!r}", error
-                ) from error
+            except BaseException as error:
+                _rollback_created(error, sandbox, self._connection, session)
+                if isinstance(error, Exception):
+                    raise _convert_error(
+                        f"initialize sandbox cwd {spec.command_cwd!r}", error
+                    ) from error
+                raise
         return session
+
+    def from_snapshot(self, spec: SnapshotRestoreSpec) -> BackendSession:
+        return self._restore_snapshot(spec, self._connection)
+
+    @staticmethod
+    def _restore_snapshot(spec: SnapshotRestoreSpec, connection: Any) -> BackendSession:
+        _validate_restore_timeout(spec.schedule_timeout, spec.timeout)
+        tunnel = spec.reverse_tunnel
+        if tunnel is not None and tunnel.reverse_port != tunnel.listen_port - 1:
+            raise UnsupportedBackendFeatureError(
+                "Backend 'adx' requires reverse_port to equal listen_port - 1."
+            )
+        started = time.monotonic()
+        try:
+            sandbox = _OwnedSandbox.create(
+                spec.snapshot_id,
+                idle_timeout=spec.idle_timeout,
+                schedule_timeout=spec.schedule_timeout,
+                create_timeout=spec.timeout,
+                name=spec.name,
+                cwd=spec.command_cwd,
+                port_forwardings=list(spec.port_forwardings),
+                mounts=[_native_mount(mount) for mount in spec.mounts],
+                upstream=tunnel.target if tunnel else None,
+                proxy_port=tunnel.listen_port if tunnel else _DEFAULT_LISTEN_PORT,
+                tunnel_connect_timeout=tunnel.connect_timeout if tunnel else None,
+                detached=spec.detached,
+                failover=spec.failover,
+                node_id=spec.node_id,
+                network=(
+                    _native_network_policy(spec.network_policy)
+                    if spec.network_policy is not None
+                    else None
+                ),
+                data_plane_security=adx_environment.DataPlaneSecurityPolicy(
+                    tunnel_mode="tls",
+                    port_forward_mode="tls",
+                ),
+                connection=connection,
+                )
+        except UnsupportedBackendFeatureError:
+            raise
+        except Exception as error:
+            raise _convert_error("restore snapshot", error) from error
+        session = None
+        try:
+            session = _Session(sandbox, spec, connection)
+            deadline = min(started + spec.timeout, time.monotonic() + 10)
+            while True:
+                try:
+                    session.commands.list()
+                    break
+                except BackendOperationError as error:
+                    if not _route_read_retryable(error) or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+        except BaseException as error:
+            _rollback_created(error, sandbox, connection, session)
+            raise
+        return session
+
+    def get_snapshot(self, snapshot_id: str) -> SnapshotInfo:
+        try:
+            value = adx_environment.Environment.get_snapshot(
+                snapshot_id,
+                connection=self._connection,
+            )
+            return SnapshotInfo(str(value.snapshot_id), tuple(value.names))
+        except Exception as error:
+            raise _convert_error("get snapshot", error) from error
+
+    def list_snapshots(
+        self,
+        name: str | None,
+        next_token: str | None,
+        limit: int | None,
+    ) -> tuple[list[SnapshotInfo], str | None]:
+        try:
+            values, token = adx_environment.Environment.list_snapshots(
+                name=name,
+                page_token=next_token,
+                page_size=limit,
+                connection=self._connection,
+            )
+            return [
+                SnapshotInfo(str(v.snapshot_id), tuple(v.names)) for v in values
+            ], token or None
+        except Exception as error:
+            raise _convert_error("list snapshots", error) from error
+
+    def delete_snapshot(self, snapshot_id: str) -> None:
+        self._delete_snapshot(snapshot_id, self._connection)
+
+    @staticmethod
+    def _delete_snapshot(snapshot_id: str, connection: Any) -> None:
+        try:
+            adx_environment.Environment.delete_snapshot(
+                snapshot_id,
+                connection=connection,
+            )
+        except Exception as error:
+            if getattr(error, "status_code", None) == 404:
+                return
+            raise _convert_error("delete snapshot", error) from error
 
     def delete_named(self, name: str) -> None:
         sandbox_id = f"{self.namespace}-{name}"
