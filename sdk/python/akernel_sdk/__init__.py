@@ -18,9 +18,13 @@ import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ._compose import ComposeOperationError as ComposeOperationError
+    from ._compose import ComposeProject as ComposeProject
+    from ._compose import ServiceHandle as ServiceHandle
     from ._docker_runtime import DockerRuntime as DockerRuntime
     from ._image_plan import ImageMountPlan as ImageMountPlan
     from ._image_resolver import prepare_compose_images as prepare_compose_images
+    from ._service_process import ServiceProcessHandle as ServiceProcessHandle
 
 from ._backends.errors import (
     AuthenticationException,
@@ -99,6 +103,10 @@ __all__ = [
     "ServiceBusyException",
     "CommandExitException",
     "ForkCleanupError",
+    "ComposeProject",
+    "ServiceHandle",
+    "ServiceProcessHandle",
+    "ComposeOperationError",
     "DockerRuntime",
     "ImageMountPlan",
     "prepare_compose_images",
@@ -118,6 +126,10 @@ __all__ = [
 ]
 
 _LAZY_IMPORTS = {
+    "ComposeProject": ("._compose", "ComposeProject"),
+    "ServiceHandle": ("._compose", "ServiceHandle"),
+    "ComposeOperationError": ("._compose", "ComposeOperationError"),
+    "ServiceProcessHandle": ("._service_process", "ServiceProcessHandle"),
     "DockerRuntime": ("._docker_runtime", "DockerRuntime"),
     "ImageMountPlan": ("._image_plan", "ImageMountPlan"),
     "prepare_compose_images": ("._image_resolver", "prepare_compose_images"),

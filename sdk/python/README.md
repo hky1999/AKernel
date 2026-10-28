@@ -1411,3 +1411,55 @@ finally:
 The SDK prepares manifest/config metadata only. Sandboxd's existing OCI/ROFS image manager supplies immutable shared lower roots; containerd uses a private managed upper. Credentials for metadata discovery and node layer fetching are separate. No task image build/push or user image plan is required. Original definitions are read without rewriting them. Host-network compatibility is limited to the qualified Linux/amd64 profile described above; Harbor continues to own its normal service, bind, resource and verifier overlays.
 
 `from_snapshot(..., extra_config=...)` and `create(snapshot_id=..., extra_config=...)` forward validated, defensively copied runtime configuration. Supply the same managed-upper geometry and image mounts on restore. Native ADX DTOs, client connection/TLS handling and reconstructed commands/files/tunnel handles stay inside the SDK. Snapshot restore does not capture local Python harness state or external services; callers own alignment, fencing the previous execution and deleting snapshots.
+
+### Compose projects and service processes (source preview)
+
+`ComposeProject`, `ServiceHandle` and `ServiceProcessHandle` are provided by source preview `0.2.0rc4.dev1`. They use the same managed Docker runtime and existing ROFS provider described above. No Agent DX server, Coordinator or runtime bundle change is required for these client APIs.
+
+`ComposeProject.prepare()` freezes a private local copy of the selected context and Compose bytes, discovers image inputs from that copy and produces sandbox mount/config options. Put `output_dir` outside the input context. Keep build contexts inside the selected directory. The qualified runsc profile uses host networking; explicit Compose networks and scaled service process handles are rejected. Task files are not rewritten. Generic SDK defaults contain no Harbor service or artifact names.
+
+```python
+from pathlib import Path
+from akernel_sdk import ComposeProject, DockerRuntime, Sandbox, ServiceProcessHandle
+
+project = ComposeProject.prepare(
+    "./project", ["./project/docker-compose.yaml"],
+    runtime=DockerRuntime(bridge_binary=Path("/opt/tools/akernel-image-bridge"),
+                          writable_mb=2048, writable_backing="file"),
+    auto_images=True, output_dir="./artifacts/compose",
+)
+sandbox = Sandbox(image="<compatible-dind-runtime-image>", cpu=4000,
+                  memory=8192, storage_mb=30720, cwd="/", failover=False,
+                  **project.sandbox_options())
+try:
+    project.start_runtime(sandbox)       # fresh creation only
+    project.build(timeout=600)
+    project.pull(timeout=600)
+    # Apply the application's running network policy here if required.
+    project.up(wait_timeout=600)
+    worker = project.service("worker")
+    print(worker.exec("uname -s").stdout)  # POSIX sh by default
+    process = worker.start_process("exec python3 worker.py", cwd="/app")
+    process.signal("stop")
+    snapshot = sandbox.create_snapshot(timeout=300)
+    project_state, process_state = project.descriptor, process.descriptor
+    # Persist these JSON descriptors with application/harness state as needed.
+    sandbox.kill()                      # fence source before continuing clone
+    restored = Sandbox.from_snapshot(snapshot, cwd="/", failover=False,
+                                     **project.sandbox_options())
+    try:
+        attached = ComposeProject.attach(restored, project_state)
+        original = ServiceProcessHandle.attach(attached.service("worker"), process_state)
+        original.signal("continue")     # original PID/process, no build/up/start
+    finally:
+        restored.kill()
+        Sandbox.delete_snapshot(snapshot.snapshot_id)
+finally:
+    sandbox.kill()
+```
+
+`ServiceHandle` provides exec, upload/download (including directories), stop and process start. Select shell, login behavior, cwd, user and environment explicitly; the SDK does not assign a special main service. `ServiceProcessHandle` uses a stable process token, Docker container ID/start time and Linux process start time. Its in-service monitor and identity record are captured with the sandbox. It supports inspect, tree stop/continue/terminate/kill and exit-code wait. Python 3 is required only for managed service processes, not ordinary service exec. The process is detached from the short-lived docker-exec submission; outer command PIDs are not used to signal the inner process.
+
+Unknown start failures retain `error.process_descriptor`; attach using that token to observe the original execution instead of submitting it again. A restarted/replaced container or changed process identity is rejected. A partial runtime startup is fresh-only and cannot be replayed on the same project object; delete the owned sandbox after failure. Compose failures retain phase, exit code, stdout/stderr and diagnostic logs. The SDK never silently retries a side-effecting Compose operation with an unknown outcome.
+
+`ComposeProject.attach()` only reconstructs client bindings. It does not upload files, start daemons, build images or recreate services. Snapshot restore must retain the same mount/upper options, rebind tunnels and the current network policy, and fence the previous execution before resuming it. Application conversation state and checkpoint timing remain with the application. Descriptors may contain explicit project environment values; store them with the same protection as application configuration.
