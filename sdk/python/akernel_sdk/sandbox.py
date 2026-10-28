@@ -30,7 +30,7 @@ from ._backends.base import (
     SandboxSpec,
     SnapshotRestoreSpec,
 )
-from ._backends.errors import retain_failure_context
+from ._backends.errors import BackendOperationError, retain_failure_context
 from ._backends.registry import load_backend
 from ._dockerfile_launch import DockerfileLaunch
 from ._dualmethod import DualMethod
@@ -503,6 +503,10 @@ class Sandbox:
         An interruption retains its type/object and snapshot_id, unresolved
         pending_environment_ids, cleanup-only pending_sandboxes and cleanup_errors
         for reconciliation; final snapshot deletion is in this cleanup scope.
+        Automatic rollback deletes only ownership-confirmed new children. Local
+        closure alone leaves a pending cleanup handle for an explicit kill().
+        creation_errors retains all backend creation and prior binding errors,
+        including children not yet visited by public binding.
         Unknown create outcomes retain structured operation context and are not
         blindly replayed. External services and writable host mounts are shared
         external state; Python handles/streams are not cloned. Quiesce tools
@@ -544,6 +548,7 @@ class Sandbox:
         results: list[Sandbox | Exception] = []
         cleanup_failures: list[tuple[Sandbox, BaseException]] = []
         cleanup_attempted: set[str] = set()
+        retained_sandboxes: list[Sandbox] = []
         try:
             for child in outcome.results:
                 if isinstance(child, Exception):
@@ -558,12 +563,13 @@ class Sandbox:
                             detached=False,
                             cleanup_failures=cleanup_failures,
                             cleanup_attempted=cleanup_attempted,
+                            retained_sandboxes=retained_sandboxes,
                         )
                     )
                 except Exception as error:
                     results.append(error)
         except BaseException as failure:
-            pending = [handle for handle, _ in cleanup_failures]
+            pending = [*retained_sandboxes, *(h for h, _ in cleanup_failures)]
             errors: list[BaseException] = [error for _, error in cleanup_failures]
             if outcome.cleanup_error is not None:
                 errors.append(outcome.cleanup_error)
@@ -572,13 +578,15 @@ class Sandbox:
                 if child.id in cleanup_attempted:
                     continue
                 try:
-                    child.terminate()
+                    deleted = child.rollback_creation()
                 except BaseException as error:
+                    deleted = False
+                    errors.append(error)
+                if deleted is not True:
                     pending.append(type(self)._session_handle(
                         child, reverse_tunnel=self._reverse_tunnel,
                         ports=sorted(self._forwarded_ports), detached=False,
                     ))
-                    errors.append(error)
             try:
                 type(self)._backend().delete_snapshot(outcome.snapshot_id)
             except BaseException as error:
@@ -588,20 +596,33 @@ class Sandbox:
                 created_environment_ids=tuple(child.id for child in children),
                 pending_environment_ids=tuple(child.id for child in pending),
                 pending_sandboxes=tuple(pending), cleanup_errors=tuple(errors),
-                creation_errors=tuple(r for r in results if isinstance(r, Exception)),
+                # Backend creation finished before public binding began. Keep
+                # even errors beyond the interrupted binding, plus earlier
+                # facade errors; retain_fork_failure deduplicates by identity.
+                creation_errors=tuple(
+                    r for r in (*outcome.results, *results) if isinstance(r, Exception)
+                ),
             )
             raise
-        if outcome.cleanup_error is not None or cleanup_failures:
-            cleanup_error = (
-                outcome.cleanup_error
-                if outcome.cleanup_error is not None
-                else cleanup_failures[0][1]
-            )
+        if outcome.cleanup_error is not None or cleanup_failures or retained_sandboxes:
+            cleanup_error: BaseException
+            if outcome.cleanup_error is not None:
+                cleanup_error = outcome.cleanup_error
+            elif cleanup_failures:
+                cleanup_error = cleanup_failures[0][1]
+            else:
+                cleanup_error = BackendOperationError(
+                    "remote cleanup unconfirmed: ownership permits local closure only",
+                    code="CLEANUP_UNCONFIRMED", outcome="not_started",
+                    environment_id=retained_sandboxes[0].id,
+                )
             raise ForkCleanupError(
                 outcome.snapshot_id,
                 results,
                 cleanup_error,
-                pending_sandboxes=tuple(child for child, _ in cleanup_failures),
+                pending_sandboxes=(
+                    *retained_sandboxes, *(child for child, _ in cleanup_failures)
+                ),
                 child_cleanup_errors=tuple(error for _, error in cleanup_failures),
             ) from cleanup_error
         return results
@@ -945,6 +966,7 @@ class Sandbox:
         detached: bool,
         cleanup_failures: builtins.list[tuple[Sandbox, BaseException]] | None = None,
         cleanup_attempted: set[str] | None = None,
+        retained_sandboxes: builtins.list[Sandbox] | None = None,
         rollback_created: bool = True,
     ) -> Sandbox:
         result = cls._session_handle(
@@ -967,7 +989,9 @@ class Sandbox:
                 cleanup_attempted.add(session.id)
             try:
                 if rollback_created:
-                    session.rollback_creation()
+                    deleted = session.rollback_creation()
+                    if deleted is not True and retained_sandboxes is not None:
+                        retained_sandboxes.append(result)
                 else:
                     session.close()
             except BaseException as error:

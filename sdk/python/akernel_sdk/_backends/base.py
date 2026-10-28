@@ -253,8 +253,11 @@ class BackendSession(Protocol):
 
     def update_network_policy(self, policy: NetworkPolicy | None) -> None: ...
 
-    def rollback_creation(self) -> None:
-        """Release initialization resources, preserving reused remote work."""
+    def rollback_creation(self) -> bool:
+        """Release local resources; return True only for confirmed remote deletion.
+
+        Unconfirmed ownership permits local closure only and returns False.
+        """
         ...
 
     def terminate(self) -> None: ...

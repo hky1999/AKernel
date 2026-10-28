@@ -498,6 +498,10 @@ policy acknowledgment from constructor success or absence of a requested policy.
 Fork cancellation cleanup includes final snapshot deletion. Preserve the original
 exception and retain all unresolved IDs, cleanup-only public Sandbox handles,
 snapshot ID and cleanup/creation errors, including secondary interruptions.
+Collect creation errors from all backend results plus prior public binding
+errors. Automatic rollback deletes only ownership-confirmed new children;
+local closure without a remote deletion acknowledgement must leave a pending
+cleanup handle for an explicit kill, including on older create responses.
 Run `sdk/python/tests/integration/test_fork.py` with explicit integration opt-in
 and a complete Python root image to validate memory/FD and private-write
 isolation. This is distinct from a read-only CLI mount image.

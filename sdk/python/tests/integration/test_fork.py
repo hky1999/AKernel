@@ -164,7 +164,7 @@ class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
 
         with (
             patch.object(adx.AdxBackend, "_restore_snapshot", side_effect=stop_second),
-            patch.object(adx._Session, "terminate", side_effect=deletion),
+            patch.object(adx._Session, "rollback_creation", side_effect=deletion),
             self.assertRaises(KeyboardInterrupt) as raised,
         ):
             self.source.fork(count=2)
@@ -206,8 +206,25 @@ class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
 
     def test_final_snapshot_delete_interruption_cleans_real_children(self):
         delete = adx.AdxBackend._delete_snapshot
+        restore = adx.AdxBackend._restore_snapshot
         interruption = KeyboardInterrupt("client-injected final delete interruption")
         attempts = 0
+        children = []
+
+        def remember_child(spec, connection):
+            child = restore(spec, connection)
+            children.append(child)
+            self.remember(
+                [
+                    Sandbox._session_handle(
+                        child,
+                        reverse_tunnel=None,
+                        ports=[],
+                        detached=False,
+                    )
+                ]
+            )
+            return child
 
         def stop_first(identity, connection):
             nonlocal attempts
@@ -218,15 +235,26 @@ class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
 
         with (
             patch.object(adx.AdxBackend, "_delete_snapshot", side_effect=stop_first),
+            patch.object(
+                adx.AdxBackend, "_restore_snapshot", side_effect=remember_child
+            ),
             self.assertRaises(KeyboardInterrupt) as raised,
         ):
             self.source.fork()
         error = raised.exception
         self.assertIs(error, interruption)
         self.assertEqual(error.snapshot_id, self.snapshot_ids[0])
-        self.assertEqual(error.pending_environment_ids, ())
-        self.assertEqual(error.pending_sandboxes, ())
         self.assertEqual(len(error.created_environment_ids), 1)
+        confirmed = children[0]._sandbox.newly_created is True
+        if confirmed:
+            self.assertEqual(error.pending_environment_ids, ())
+            self.assertEqual(error.pending_sandboxes, ())
+        else:
+            self.assertEqual(error.pending_environment_ids, (children[0].id,))
+            self.assertEqual(Sandbox.get_info(children[0].id).state, "running")
+            pending = self.remember(error.pending_sandboxes)[0]
+            pending.kill()
+            Sandbox.delete_snapshot(error.snapshot_id)
         with self.assertRaises(SandboxNotFoundException):
             Sandbox.get_info(error.created_environment_ids[0])
         self.assertEqual(
@@ -239,8 +267,164 @@ class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
                     "case": "final_delete_interruption",
                     "fault_injection": "client-only",
                     "created_child_deleted": True,
+                    "automatic_delete_ownership_confirmed": confirmed,
+                    "unconfirmed_child_retained_for_explicit_cleanup": not confirmed,
                     "snapshot_cleanup_retried": True,
                     "original_interruption_preserved": True,
+                    "source_untouched": True,
+                }
+            ),
+            flush=True,
+        )
+
+    def test_later_creation_error_survives_earlier_binding_interruption(self):
+        restore = adx.AdxBackend._restore_snapshot
+        interruption = KeyboardInterrupt("client-injected first binding interruption")
+        rollback = RuntimeError("client-injected later rollback failure")
+        later = None
+        children = []
+
+        def restore_then_fail(spec, connection):
+            nonlocal later
+            child = restore(spec, connection)
+            children.append(child)
+            # Test-owned handles guarantee teardown even if an assertion fails;
+            # their existence does not give the SDK ownership of error IDs.
+            self.remember(
+                [
+                    Sandbox._session_handle(
+                        child,
+                        reverse_tunnel=None,
+                        ports=[],
+                        detached=False,
+                    )
+                ]
+            )
+            if len(children) == 1:
+                patcher = patch.object(child, "get_info", side_effect=interruption)
+                patcher.start()
+                self.addCleanup(patcher.stop)
+                return child
+            later = BackendOperationError(
+                "client-injected uncertain later create",
+                environment_id=child.id,
+                request_id="injected-request",
+                operation_id="injected-operation",
+                outcome="unknown",
+                cleanup_errors=(rollback,),
+            )
+            raise later
+
+        with (
+            patch.object(
+                adx.AdxBackend, "_restore_snapshot", side_effect=restore_then_fail
+            ),
+            self.assertRaises(KeyboardInterrupt) as raised,
+        ):
+            self.source.fork(count=2)
+        error = raised.exception
+        self.assertIs(error, interruption)
+        self.assertEqual(error.creation_errors, (later,))
+        retained = error.creation_errors[0]
+        self.assertEqual(retained.environment_id, children[1].id)
+        self.assertEqual(retained.request_id, "injected-request")
+        self.assertEqual(retained.operation_id, "injected-operation")
+        self.assertEqual(retained.outcome, "unknown")
+        self.assertIs(retained.cleanup_errors[0], rollback)
+        self.assertEqual(Sandbox.get_info(children[1].id).state, "running")
+        self.remember(error.pending_sandboxes)
+        # This test observed the actual returned sessions before injecting the
+        # uncertain error; explicit cleanup uses those test-owned identities.
+        for child in reversed(children):
+            child.terminate()
+        Sandbox.delete_snapshot(error.snapshot_id)
+        self.assertEqual(
+            self.source.commands.run("printf source-alive").stdout, "source-alive"
+        )
+        print(
+            "proof:",
+            json.dumps(
+                {
+                    "case": "later_creation_error_during_binding_interrupt",
+                    "fault_injection": "client-only",
+                    "complete_creation_errors": True,
+                    "nested_request_operation_rollback_preserved": True,
+                    "uncertain_child_not_automatically_deleted": True,
+                    "explicit_owned_cleanup": True,
+                    "source_untouched": True,
+                }
+            ),
+            flush=True,
+        )
+
+    def test_local_only_binding_rollback_keeps_real_child_retryable(self):
+        restore = adx.AdxBackend._restore_snapshot
+        interruption = KeyboardInterrupt("client-injected binding interruption")
+        children = []
+        delete_calls = []
+
+        def unconfirmed_child(spec, connection):
+            child = restore(spec, connection)
+            children.append(child)
+            self.remember(
+                [
+                    Sandbox._session_handle(
+                        child,
+                        reverse_tunnel=None,
+                        ports=[],
+                        detached=False,
+                    )
+                ]
+            )
+            # Exercise conservative behavior even on servers that return True.
+            child._sandbox._newly_created = False
+            original_delete = child.terminate
+
+            def explicit_delete():
+                delete_calls.append(child.id)
+                return original_delete()
+
+            for name, replacement in (
+                ("get_info", interruption),
+                ("terminate", explicit_delete),
+            ):
+                patcher = patch.object(child, name, side_effect=replacement)
+                patcher.start()
+                self.addCleanup(patcher.stop)
+            return child
+
+        with (
+            patch.object(
+                adx.AdxBackend, "_restore_snapshot", side_effect=unconfirmed_child
+            ),
+            self.assertRaises(KeyboardInterrupt) as raised,
+        ):
+            self.source.fork()
+        error = raised.exception
+        self.assertIs(error, interruption)
+        self.assertEqual(error.pending_environment_ids, (children[0].id,))
+        self.assertEqual(len(error.pending_sandboxes), 1)
+        self.assertEqual(delete_calls, [])
+        self.assertTrue(children[0]._closed)
+        self.assertEqual(Sandbox.get_info(children[0].id).state, "running")
+        pending = self.remember(error.pending_sandboxes)[0]
+        pending.kill()
+        self.assertEqual(delete_calls, [children[0].id])
+        with self.assertRaises(SandboxNotFoundException):
+            Sandbox.get_info(children[0].id)
+        Sandbox.delete_snapshot(error.snapshot_id)
+        self.assertEqual(
+            self.source.commands.run("printf source-alive").stdout, "source-alive"
+        )
+        print(
+            "proof:",
+            json.dumps(
+                {
+                    "case": "local_only_binding_rollback",
+                    "fault_injection": "client-only",
+                    "local_client_closed_remote_still_running": True,
+                    "no_automatic_delete_without_ownership": True,
+                    "pending_handle_explicit_kill_retry": True,
                     "source_untouched": True,
                 }
             ),

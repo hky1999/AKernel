@@ -31,6 +31,7 @@ def backend():
 
 def session(identity):
     value = MagicMock(id=identity)
+    value.terminate.return_value = True
     value.rollback_creation = value.terminate
     value.get_info.return_value = SandboxInfo(identity, "running", 1000, 1024, "image")
     return value

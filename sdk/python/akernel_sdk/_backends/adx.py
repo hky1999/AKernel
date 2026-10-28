@@ -794,7 +794,8 @@ class _Session:
         errors: list[BaseException] = []
         for child in children:
             try:
-                child.terminate()
+                if child.rollback_creation() is not True:
+                    pending.append(child)
             except BaseException as error:
                 pending.append(child)
                 errors.append(error)
@@ -903,12 +904,13 @@ class _Session:
         self._network_policy = policy
         self._network_policy_known = True
 
-    def rollback_creation(self) -> None:
-        """Delete only a confirmed new instance after initialization fails."""
-        if self._sandbox.newly_created is True:
+    def rollback_creation(self) -> bool:
+        """Acknowledge remote deletion separately from local-only closure."""
+        if self._terminated or getattr(self._sandbox, "newly_created", False) is True:
             self.terminate()
-        else:
-            self.close()
+            return True
+        self.close()
+        return False
 
     def terminate(self) -> None:
         if self._terminated:

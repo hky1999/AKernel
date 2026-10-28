@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 class ForkCleanupError(RuntimeError):
-    """A fork completed but some owned resource cleanup was not acknowledged.
+    """A fork completed but some resource cleanup was not acknowledged.
 
     ``results`` retains every child result, including live Sandbox handles.
     Process/kill these handles as usual, and retry

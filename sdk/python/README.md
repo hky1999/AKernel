@@ -841,8 +841,12 @@ The count/ordered partial-result convention follows
   Other initial cleanup failures raise `ForkCleanupError`: `results` retains
   successful child handles, `snapshot_id` supports retrying deletion, and
   `cleanup_error` preserves the original error. A failed client binding whose
-  child deletion also fails is retained in `pending_sandboxes`; retry `kill()`.
-  The corresponding failures are in `child_cleanup_errors`. If snapshot cleanup
+  child deletion fails or is unconfirmed is retained in `pending_sandboxes`;
+  retry `kill()` after deciding that remote deletion is intended.
+  Actual cleanup exceptions are in `child_cleanup_errors`; local-only closure
+  need not raise one. With no other cleanup error, `cleanup_error.code` is the
+  SDK-generated `CLEANUP_UNCONFIRMED` (`outcome="not_started"` for remote
+  deletion). If snapshot cleanup
   fails on the last child kill, that call raises `ForkCleanupError` with the
   snapshot ID; retry that child's `kill()` or delete the snapshot explicitly.
   Confirmed child deletion is not repeated during that retry.
@@ -853,8 +857,13 @@ unconfirmed create may still exist remotely. Distinguish native lookup names
 from canonical IDs when reconciling. Confirmed-created IDs, including failures
 during native bootstrap or public binding, remain in `environment_id`; rollback
 failures remain in `cleanup_errors`. Interruption, including during final
-snapshot deletion, attempts to delete every known child and the temporary
-snapshot and re-raises the original exception object/type. Reconciliation data
+snapshot deletion, attempts ownership-aware rollback of every known child and
+deletion of the temporary snapshot, and re-raises the original exception
+object/type. Automatic rollback deletes only confirmed newly created children;
+false or missing ownership closes local resources only. Local closure is not
+remote deletion: these children stay pending with retryable handles, even when
+local closure succeeds. An explicit `kill()` can delete such a child by ID after
+the local client has closed. Reconciliation data
 on that exception includes `snapshot_id`, `created_environment_ids`,
 `pending_environment_ids`, `pending_sandboxes`, `cleanup_errors`, and
 `creation_errors`. Pending sandboxes are cleanup-only public handles: retry
@@ -864,6 +873,11 @@ retained alongside other cleanup errors rather than replacing the first one.
 After releasing unresolved users, explicitly retry snapshot deletion. Unknown
 creation errors retain their lookup/request context; do not blindly delete a
 lookup name as though it were a confirmed-created ID.
+`creation_errors` combines the complete backend result set with earlier public
+binding errors, deduplicated by exception identity. It preserves nested request,
+operation, lookup and rollback context even if binding an earlier child is
+interrupted. Uncertain creation errors do not grant ownership or trigger deletion
+of their lookup names.
 
 Run real isolation, partial-failure and cleanup acceptance on a supporting
 deployment using a complete image that contains Python 3 (not a CLI mount image):
