@@ -1415,7 +1415,7 @@ The SDK prepares manifest/config metadata only. Sandboxd's existing OCI/ROFS ima
 
 ### Compose projects and service processes (source preview)
 
-`ComposeProject`, `ServiceHandle` and `ServiceProcessHandle` are provided by source preview `0.2.0rc4.dev2`. They use the same managed Docker runtime and existing ROFS provider described above. No Agent DX server, Coordinator or runtime bundle change is required for these client APIs.
+`ComposeProject`, `ServiceHandle` and `ServiceProcessHandle` are provided by source preview `0.2.0rc4.dev3`. They use the same managed Docker runtime and existing ROFS provider described above. No Agent DX server, Coordinator or runtime bundle change is required for these client APIs.
 
 `ComposeProject.prepare()` freezes a private local copy of the selected context and Compose bytes, discovers image inputs from that copy and produces sandbox mount/config options. Put `output_dir` outside the input context. Keep build contexts inside the selected directory. The default `network="bridge"` preserves original Compose network definitions, Docker IPAM, DNS and published TCP/UDP ports. The explicit `network="host"` compatibility profile still adds host/loopback aliases and rejects explicit Compose networks. Scaled service process handles are rejected. Task files are not rewritten. Generic SDK defaults contain no Harbor service or artifact names.
 
@@ -1526,3 +1526,5 @@ It checks default/custom DNS, aliases, disjoint-network isolation, TCP/UDP port
 mappings, peer-restricted model HTTP/auth/SSE, new egress, and original service
 and published-port TCP sockets across two snapshot/delete/restore cycles. All
 owned environments and snapshots are deleted; no deployment is changed.
+
+Service process trees freeze waiters before descendants and thaw descendants before waiters. This avoids Bash treating a still-stopped child as an exited tool (status 147); the regression uses a real job-control Bash waiter with a forced scheduler switch. Numeric PID order is not used as ancestry.

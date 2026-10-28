@@ -138,3 +138,54 @@ class ServiceProcessTest(unittest.TestCase):
         self.assertTrue(handle.inspect())
         handle.signal("kill")
         self.assertEqual(handle.wait(timeout=3), 137)
+
+    def test_thaw_children_before_bash_waiter_does_not_report_sigstop_as_exit(self):
+        import time
+        from unittest.mock import patch
+
+        from akernel_sdk import _service_process_guest as guest
+
+        root = Path(self.temp.name)
+        ready, result = root / "ready", root / "wait-result"
+        command = (
+            "set -m; sleep 1 & worker=$!; "
+            f'echo "$worker" > {ready}; wait "$worker"; echo "$?" > {result}'
+        )
+        handle = ServiceProcessHandle.start(self.service, command)
+        deadline = time.monotonic() + 3
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(ready.exists())
+        child = int(ready.read_text())
+        child_identity = guest.stat(child)
+        process_root = Path("/tmp/akernel-service-process-" + handle.process_id)
+        kill = os.kill
+
+        def scheduled_kill(pid, sig):
+            kill(pid, sig)
+            if sig == signal.SIGCONT and pid == handle.pid:
+                # Reproduce a scheduler switch to the waiting Bash immediately
+                # after its thaw. A still-stopped child must not yield status 147.
+                time.sleep(0.08)
+
+        try:
+            handle.signal("stop")
+            with patch.object(guest.os, "kill", side_effect=scheduled_kill):
+                guest.operate(process_root, "continue")
+            self.assertEqual(handle.wait(timeout=3), 0)
+            self.assertEqual(result.read_text().strip(), "0")
+        finally:
+            current = guest.stat(child)
+            if (
+                current
+                and child_identity
+                and current["start_time"] == child_identity["start_time"]
+            ):
+                try:
+                    kill(child, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                os.waitpid(child, 0)
+            except ChildProcessError:
+                pass

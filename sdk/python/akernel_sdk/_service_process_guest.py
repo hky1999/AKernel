@@ -112,7 +112,19 @@ def operate(root, action):
     if action not in signals:
         raise ValueError("unsupported process action")
     for _ in range(3 if action == "stop" else 1):
-        for row in rows:
+        parents = {row["pid"]: row["ppid"] for row in rows}
+
+        def depth(row, parents=parents):
+            pid, visited = row["pid"], set()
+            while pid in parents and pid not in visited:
+                visited.add(pid)
+                pid = parents[pid]
+            return len(visited)
+
+        # Freeze waiters before children. Thaw children before waiters so Bash
+        # cannot consume a pending child-stop notification as exit status 147.
+        # PID numeric ordering does not encode ancestry after PID reuse/wrap.
+        for row in sorted(rows, key=depth, reverse=action == "continue"):
             current = stat(row["pid"])
             if current is not None and current["start_time"] == row["start_time"]:
                 try:
