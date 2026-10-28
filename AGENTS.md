@@ -491,8 +491,13 @@ deadlines for client bootstrap/cleanup. Preserve known IDs and cleanup_errors
 through constructor, route and facade failures, including BaseException during
 tunnel bootstrap. The pinned ADX restore does not inherit network policy:
 from_snapshot callers must supply restrictions explicitly. Fork sends the source
-client's acknowledged policy during creation and refuses to capture after an
-unconfirmed policy update until it has been successfully reapplied.
+client's acknowledged policy during creation. Trust a creation policy only for
+a confirmed newlyCreated=true response; named reuse, missing ownership and
+connect require a successful explicit policy reapply before fork. Never infer
+policy acknowledgment from constructor success or absence of a requested policy.
+Fork cancellation cleanup includes final snapshot deletion. Preserve the original
+exception and retain all unresolved IDs, cleanup-only public Sandbox handles,
+snapshot ID and cleanup/creation errors, including secondary interruptions.
 Run `sdk/python/tests/integration/test_fork.py` with explicit integration opt-in
 and a complete Python root image to validate memory/FD and private-write
 isolation. This is distinct from a read-only CLI mount image.
@@ -630,6 +635,9 @@ the logical ID, while snapshot restore/fork create new IDs. Custom metadata,
 running lifetime, live output callbacks and per-command user selection are
 separate backend extensions, outside this SDK surface. Attachment rollback
 must never delete an existing sandbox. Keep command reconnection free of replay.
+Capture a command's stable ID atomically with start/connect and bind wait, stdin
+and kill to that identity, even if another retained record reuses its PID. Map
+the pinned native PermissionDenied exception without inventing a missing status.
 
 `BackendOperationError` preserves optional structured service fields and the
 original cause; missing context remains `None`. Keep retry/outcome semantics

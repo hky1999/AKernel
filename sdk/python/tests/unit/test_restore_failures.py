@@ -252,7 +252,7 @@ class RestoreFailureTest(unittest.TestCase):
             create.assert_not_called()
 
     def test_invalid_fork_budget_fails_before_capture(self):
-        native = MagicMock(id="source")
+        native = MagicMock(id="source", newly_created=True)
         source = adx._Session(native, restore_spec(), self.backend._connection)
         with patch.object(source, "create_snapshot") as capture:
             for timeout in (1, 20, 70, 89):

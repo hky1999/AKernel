@@ -53,7 +53,7 @@ class BackendOperationError(RuntimeError):
         failure: dict[str, Any] | None = None,
         probe_failure: dict[str, Any] | None = None,
         request_forwarded: bool | None = None,
-        cleanup_errors: tuple[Exception, ...] = (),
+        cleanup_errors: tuple[BaseException, ...] = (),
         command_id: str | None = None,
     ) -> None:
         super().__init__(message)
@@ -117,7 +117,7 @@ class CommandExitException(BackendOperationError):
 def retain_failure_context(
     error: BaseException,
     environment_id: str,
-    cleanup_error: Exception | None = None,
+    cleanup_error: BaseException | None = None,
 ) -> None:
     """Preserve authoritative identity and cleanup errors without replacing failure.
 

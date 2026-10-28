@@ -34,12 +34,19 @@ def main() -> None:
     pending_snapshot = None
     try:
         with Sandbox(image=args.image) as source:
+            # This example owns a fresh unrestricted sandbox. Older APIs may
+            # omit creation ownership, so explicitly acknowledge this policy.
+            source.update_network_policy(None)
             source.files.write("/tmp/fork-example", "captured")
             try:
                 results = source.fork(count=args.count)
             except ForkCleanupError as error:
                 results = [*error.results, *error.pending_sandboxes]
                 pending_snapshot = error.snapshot_id
+                raise
+            except BaseException as error:
+                results = list(getattr(error, "pending_sandboxes", ()))
+                pending_snapshot = getattr(error, "snapshot_id", None)
                 raise
             for index, result in enumerate(results):
                 if isinstance(result, Exception):

@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .sandbox import Sandbox
@@ -39,10 +39,10 @@ class ForkCleanupError(RuntimeError):
         self,
         snapshot_id: str,
         results: list[Sandbox | Exception],
-        cleanup_error: Exception,
+        cleanup_error: BaseException,
         *,
         pending_sandboxes: tuple[Sandbox, ...] = (),
-        child_cleanup_errors: tuple[Exception, ...] = (),
+        child_cleanup_errors: tuple[BaseException, ...] = (),
     ) -> None:
         detail = (
             "child handles are available in results and pending_sandboxes"
@@ -57,3 +57,35 @@ class ForkCleanupError(RuntimeError):
         self.cleanup_error = cleanup_error
         self.pending_sandboxes = pending_sandboxes
         self.child_cleanup_errors = child_cleanup_errors
+
+
+def retain_fork_failure(
+    error: BaseException,
+    *,
+    snapshot_id: str,
+    created_environment_ids: tuple[str, ...] = (),
+    pending_environment_ids: tuple[str, ...] = (),
+    pending_sandboxes: tuple[Sandbox, ...] = (),
+    cleanup_errors: tuple[BaseException, ...] = (),
+    creation_errors: tuple[Exception, ...] = (),
+) -> None:
+    """Retain reconciliation data on the original cancellation/error object."""
+    context: Any = error
+    context.snapshot_id = snapshot_id
+    for name, values in (
+        ("created_environment_ids", created_environment_ids),
+        ("pending_environment_ids", pending_environment_ids),
+    ):
+        setattr(
+            context, name, tuple(dict.fromkeys((*getattr(error, name, ()), *values)))
+        )
+    for name, additions in (
+        ("pending_sandboxes", pending_sandboxes),
+        ("cleanup_errors", cleanup_errors),
+        ("creation_errors", creation_errors),
+    ):
+        combined = list(getattr(error, name, ()))
+        for value in additions:
+            if all(value is not item for item in combined):
+                combined.append(value)
+        setattr(context, name, tuple(combined))

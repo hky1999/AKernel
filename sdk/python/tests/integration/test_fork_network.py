@@ -28,10 +28,11 @@ import threading
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
-from akernel_sdk import HttpReverseTunnel, NetworkPolicy, Sandbox
+from akernel_sdk import BackendOperationError, HttpReverseTunnel, NetworkPolicy, Sandbox
 from tests.integration import test_fork
 
 
@@ -159,6 +160,80 @@ class ForkNetworkIntegrationTest(test_fork.ForkIntegrationFixture, unittest.Test
         self.assert_tunnel(self.source)
         self.assert_port(self.source, "source")
         return results
+
+    def test_named_reuse_requires_confirmed_policy_before_fork(self):
+        self.assert_egress(self.source, True)
+        name = "sdk-policy-reuse-" + uuid.uuid4().hex
+        policy = NetworkPolicy.block()
+        named = Sandbox(
+            image=test_fork._IMAGE,
+            name=name,
+            detached=True,
+            memory=1024,
+            idle_timeout=600,
+            network_policy=policy,
+        )
+        self.remember([named])
+        self.addCleanup(named.kill, delete_remote=True)
+        self.assert_egress(named, False)
+        reuse_options = dict(
+            image=test_fork._IMAGE,
+            name=name,
+            detached=True,
+            memory=1024,
+            idle_timeout=600,
+        )
+        reuse_mode = "omitted-policy"
+        try:
+            reopened = Sandbox(**reuse_options)
+        except BackendOperationError as error:
+            # Older deployments reject changed specifications outright;
+            # current ones may reuse while retaining the original policy.
+            if error.code != "CONFLICT" or error.outcome != "not_started":
+                raise
+            reuse_mode = "strict-spec-conflict-then-identical-reuse"
+            reopened = Sandbox(**reuse_options, network_policy=policy)
+        self.remember([reopened])
+        self.assertEqual(named.id, reopened.id)
+        self.assertFalse(reopened._session._sandbox.newly_created)
+        self.assert_egress(reopened, False)
+        original = reopened._session.create_snapshot
+
+        def capture(*args, **kwargs):
+            snapshot = original(*args, **kwargs)
+            self.snapshot_ids.append(snapshot.snapshot_id)
+            return snapshot
+
+        with patch.object(
+            reopened._session, "create_snapshot", side_effect=capture
+        ) as checkpoint:
+            with self.assertRaises(BackendOperationError) as raised:
+                reopened.fork()
+            self.assertEqual(raised.exception.code, "NETWORK_POLICY_UNCONFIRMED")
+            self.assertEqual(raised.exception.outcome, "not_started")
+            checkpoint.assert_not_called()
+            reopened.update_network_policy(policy)
+            children = self.remember(reopened.fork())
+        self.assertEqual(len(children), 1)
+        self.assertIsInstance(children[0], Sandbox)
+        self.assert_egress(children[0], False)
+        self.assert_egress(reopened, False)
+        self.assert_egress(self.source, True)
+        print(
+            "proof:",
+            json.dumps(
+                {
+                    "case": "named_reuse_policy",
+                    "reuse_mode": reuse_mode,
+                    "same_id": True,
+                    "unrestricted_baseline": True,
+                    "source_remains_blocked": True,
+                    "unconfirmed_fork_rejected_before_capture": True,
+                    "explicit_reapply_child_blocked": True,
+                }
+            ),
+            flush=True,
+        )
 
     def test_pause_connect_rebinds_tunnel_and_published_port(self):
         source = self.source

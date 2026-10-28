@@ -31,6 +31,7 @@ from akernel_sdk import (
     CommandExitException,
     ForkCleanupError,
     Sandbox,
+    SandboxNotFoundException,
     SandboxQuery,
     SandboxState,
 )
@@ -86,6 +87,14 @@ class ForkIntegrationFixture:
         source = Sandbox(**options)
         self.source = source
         self.handles.append(source)
+        # Older deployed APIs omit newlyCreated. Explicitly acknowledge this
+        # fixture's intended policy through the supported public API instead
+        # of bypassing the SDK's fail-closed ownership/policy guard.
+        if not source._session._network_policy_known:
+            source.update_network_policy(options.get("network_policy"))
+            print(
+                "legacy create response: source policy explicitly reapplied", flush=True
+            )
         probe = source.commands.run("python3 --version")
         self.assertEqual(probe.exit_code, 0, probe.stderr)
         self.assertIn("Python 3.", probe.stdout)
@@ -139,13 +148,113 @@ class ForkIntegrationFixture:
 
 @unittest.skipUnless(_ENABLED and _IMAGE, "enable integration and set a python3 image")
 class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
+    def test_interrupted_fork_returns_retryable_real_child_cleanup_handle(self):
+        self.source.files.write("/tmp/cancel-marker", "saved")
+        restore = adx.AdxBackend._restore_snapshot
+        interruption = KeyboardInterrupt("client-injected restore interruption")
+        deletion = RuntimeError("client-injected child cleanup failure")
+        attempts = 0
+
+        def stop_second(spec, connection):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 2:
+                raise interruption
+            return restore(spec, connection)
+
+        with (
+            patch.object(adx.AdxBackend, "_restore_snapshot", side_effect=stop_second),
+            patch.object(adx._Session, "terminate", side_effect=deletion),
+            self.assertRaises(KeyboardInterrupt) as raised,
+        ):
+            self.source.fork(count=2)
+        error = raised.exception
+        self.assertIs(error, interruption)
+        self.assertEqual(error.snapshot_id, self.snapshot_ids[0])
+        self.assertEqual(len(error.pending_sandboxes), 1)
+        self.assertIn(deletion, error.cleanup_errors)
+        self.assertTrue(
+            any(
+                getattr(e, "code", None) == "SNAPSHOT_IN_USE"
+                for e in error.cleanup_errors
+            )
+        )
+        pending = self.remember(error.pending_sandboxes)[0]
+        self.assertEqual(error.pending_environment_ids, (pending.id,))
+        self.assertEqual(Sandbox.get_info(pending.id).state, "running")
+        pending.kill()
+        with self.assertRaises(SandboxNotFoundException):
+            Sandbox.get_info(pending.id)
+        Sandbox.delete_snapshot(error.snapshot_id)
+        self.assertEqual(
+            self.source.commands.run("printf source-alive").stdout, "source-alive"
+        )
+        print(
+            "proof:",
+            json.dumps(
+                {
+                    "case": "interrupted_fork_cleanup",
+                    "fault_injection": "client-only",
+                    "original_interruption_preserved": True,
+                    "pending_child_handle_retry": True,
+                    "snapshot_retry": True,
+                    "source_untouched": True,
+                }
+            ),
+            flush=True,
+        )
+
+    def test_final_snapshot_delete_interruption_cleans_real_children(self):
+        delete = adx.AdxBackend._delete_snapshot
+        interruption = KeyboardInterrupt("client-injected final delete interruption")
+        attempts = 0
+
+        def stop_first(identity, connection):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise interruption
+            return delete(identity, connection)
+
+        with (
+            patch.object(adx.AdxBackend, "_delete_snapshot", side_effect=stop_first),
+            self.assertRaises(KeyboardInterrupt) as raised,
+        ):
+            self.source.fork()
+        error = raised.exception
+        self.assertIs(error, interruption)
+        self.assertEqual(error.snapshot_id, self.snapshot_ids[0])
+        self.assertEqual(error.pending_environment_ids, ())
+        self.assertEqual(error.pending_sandboxes, ())
+        self.assertEqual(len(error.created_environment_ids), 1)
+        with self.assertRaises(SandboxNotFoundException):
+            Sandbox.get_info(error.created_environment_ids[0])
+        self.assertEqual(
+            self.source.commands.run("printf source-alive").stdout, "source-alive"
+        )
+        print(
+            "proof:",
+            json.dumps(
+                {
+                    "case": "final_delete_interruption",
+                    "fault_injection": "client-only",
+                    "created_child_deleted": True,
+                    "snapshot_cleanup_retried": True,
+                    "original_interruption_preserved": True,
+                    "source_untouched": True,
+                }
+            ),
+            flush=True,
+        )
+
     def test_snapshot_catalog_and_independent_verifier(self):
         source = self.source
         name = "sdk-current-" + uuid.uuid4().hex
         source.files.write("/tmp/catalog-marker", "captured-state")
         snapshot = source.create_snapshot(name=name)
-        self.assertEqual(Sandbox.get_snapshot(snapshot.snapshot_id).snapshot_id,
-                         snapshot.snapshot_id)
+        self.assertEqual(
+            Sandbox.get_snapshot(snapshot.snapshot_id).snapshot_id, snapshot.snapshot_id
+        )
         pages = Sandbox.list_snapshots(name=name, limit=1)
         found = []
         while pages.has_next:
@@ -165,7 +274,7 @@ class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
         self.assertNotEqual(verifier.id, restored.id)
         self.assertFalse(verifier.files.exists("/tmp/catalog-marker"))
         check = (
-            "test \"$(cat /tmp/submitted-artifact)\" = captured-state && "
+            'test "$(cat /tmp/submitted-artifact)" = captured-state && '
             "printf verifier-passed"
         )
         verifier.files.write("/tmp/submitted-artifact", "invalid-output")
@@ -177,14 +286,20 @@ class ForkIntegrationTest(ForkIntegrationFixture, unittest.TestCase):
         restored.kill()
         Sandbox.delete_snapshot(snapshot.snapshot_id)
         Sandbox.delete_snapshot(snapshot.snapshot_id)
-        print("proof:", json.dumps({
-            "case": "snapshot_catalog_and_independent_verifier",
-            "create_get_filtered_list_delete": True,
-            "source_deleted_before_restore": True,
-            "captured_resources_retained": True,
-            "independent_verifier": True,
-            "verifier_rejects_invalid_output": True,
-        }), flush=True)
+        print(
+            "proof:",
+            json.dumps(
+                {
+                    "case": "snapshot_catalog_and_independent_verifier",
+                    "create_get_filtered_list_delete": True,
+                    "source_deleted_before_restore": True,
+                    "captured_resources_retained": True,
+                    "independent_verifier": True,
+                    "verifier_rejects_invalid_output": True,
+                }
+            ),
+            flush=True,
+        )
 
     def witness(self, sandbox, action="inspect"):
         request = {"id": uuid.uuid4().hex, "action": action}

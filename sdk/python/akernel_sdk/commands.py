@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Literal, overload
 
-from ._backends.base import CommandsDriver
+from ._backends.base import CommandReference, CommandsDriver
 from ._backends.errors import CommandExitException, TimeoutException
 from .types import CommandInfo, CommandResult
 
@@ -26,15 +26,22 @@ from .types import CommandInfo, CommandResult
 class CommandHandle:
     """Handle for a background process running in the sandbox."""
 
-    def __init__(self, pid: int, driver: CommandsDriver) -> None:
-        self.pid = pid
+    def __init__(self, pid: int | CommandReference, driver: CommandsDriver) -> None:
+        if isinstance(pid, CommandReference):
+            self.pid = pid.pid
+            self._command_id = pid.command_id
+        else:
+            # Preserve explicit construction with an older PID-only driver.
+            self.pid = pid
+            identity = driver.command_id(pid)
+            self._command_id = identity if isinstance(identity, str) else None
+        self._command: str | int = self._command_id or self.pid
         self._driver = driver
 
     @property
     def command_id(self) -> str | None:
-        """Stable backend command ID for reconnecting from another client."""
-        value = self._driver.command_id(self.pid)
-        return value if isinstance(value, str) else None
+        """Stable command ID fixed at attachment, independent of later PID reuse."""
+        return self._command_id
 
     def wait(
         self, timeout: int | None = None, *, check: bool = False
@@ -45,15 +52,15 @@ class CommandHandle:
         ends local observation; the remote process may continue running.
         """
         _validate_check(check)
-        return _checked_result(self._driver.wait(self.pid, timeout), check)
+        return _checked_result(self._driver.wait(self._command, timeout), check)
 
     def kill(self) -> bool:
         """Return whether a live process was signalled."""
-        return self._driver.kill(self.pid)
+        return self._driver.kill(self._command)
 
     def send_stdin(self, data: str, eof: bool = False) -> None:
         """Write text to the process's stdin."""
-        self._driver.send_stdin(self.pid, data, eof)
+        self._driver.send_stdin(self._command, data, eof)
 
     def close_stdin(self) -> None:
         """Close the process's stdin so it observes EOF."""

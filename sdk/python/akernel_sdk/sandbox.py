@@ -34,7 +34,7 @@ from ._backends.errors import retain_failure_context
 from ._backends.registry import load_backend
 from ._dockerfile_launch import DockerfileLaunch
 from ._dualmethod import DualMethod
-from ._fork import ForkCleanupError
+from ._fork import ForkCleanupError, retain_fork_failure
 from ._sandbox_resources import (
     normalize_xpu,
     validate_storage_limit_mb,
@@ -484,6 +484,8 @@ class Sandbox:
         The source keeps its identity and lifetime. Children inherit resources
         and this client's acknowledged policy, cwd, ports, mounts and tunnel.
         They are owned handles, including when the source is detached.
+        Named reuse, connect, or an API lacking creation ownership confirmation
+        requires an explicit successful update_network_policy() before fork.
 
         ``count`` is 1..20. All timeouts use seconds: ``snapshot_timeout`` bounds
         capture (1..3600), ``restore_timeout`` is each child's logical create
@@ -498,6 +500,9 @@ class Sandbox:
         retained until the last owned child is deleted; fork_snapshot_id exposes
         its identity for explicit cleanup after by-ID deletion or client restart.
         Other deletion failures preserve results and ID in ForkCleanupError.
+        An interruption retains its type/object and snapshot_id, unresolved
+        pending_environment_ids, cleanup-only pending_sandboxes and cleanup_errors
+        for reconciliation; final snapshot deletion is in this cleanup scope.
         Unknown create outcomes retain structured operation context and are not
         blindly replayed. External services and writable host mounts are shared
         external state; Python handles/streams are not cloned. Quiesce tools
@@ -515,11 +520,30 @@ class Sandbox:
             _validate_integer("restore_timeout", restore_timeout, minimum=1)
         if self._closed or self._session is None:
             raise RuntimeError("cannot fork a closed sandbox")
-        outcome = self._session.fork(
-            count, idle_timeout, snapshot_timeout, restore_timeout
-        )
+        try:
+            outcome = self._session.fork(
+                count, idle_timeout, snapshot_timeout, restore_timeout
+            )
+        except BaseException as failure:
+            pending = getattr(failure, "_fork_pending_sessions", None)
+            snapshot_id = getattr(failure, "snapshot_id", None)
+            if pending is not None and isinstance(snapshot_id, str):
+                handles = tuple(
+                    type(self)._session_handle(
+                        child, reverse_tunnel=self._reverse_tunnel,
+                        ports=sorted(self._forwarded_ports), detached=False,
+                    )
+                    for child in pending
+                )
+                retain_fork_failure(
+                    failure, snapshot_id=snapshot_id,
+                    pending_sandboxes=handles,
+                )
+                delattr(failure, "_fork_pending_sessions")
+            raise
         results: list[Sandbox | Exception] = []
-        cleanup_failures: list[tuple[Sandbox, Exception]] = []
+        cleanup_failures: list[tuple[Sandbox, BaseException]] = []
+        cleanup_attempted: set[str] = set()
         try:
             for child in outcome.results:
                 if isinstance(child, Exception):
@@ -533,21 +557,39 @@ class Sandbox:
                             ports=sorted(self._forwarded_ports),
                             detached=False,
                             cleanup_failures=cleanup_failures,
+                            cleanup_attempted=cleanup_attempted,
                         )
                     )
                 except Exception as error:
                     results.append(error)
-        except BaseException:
-            for child in outcome.results:
-                if not isinstance(child, Exception):
-                    try:
-                        child.terminate()
-                    except Exception:
-                        logger.warning(
-                            "failed to clean interrupted fork child %s",
-                            child.id,
-                            exc_info=True,
-                        )
+        except BaseException as failure:
+            pending = [handle for handle, _ in cleanup_failures]
+            errors: list[BaseException] = [error for _, error in cleanup_failures]
+            if outcome.cleanup_error is not None:
+                errors.append(outcome.cleanup_error)
+            children = [c for c in outcome.results if not isinstance(c, Exception)]
+            for child in children:
+                if child.id in cleanup_attempted:
+                    continue
+                try:
+                    child.terminate()
+                except BaseException as error:
+                    pending.append(type(self)._session_handle(
+                        child, reverse_tunnel=self._reverse_tunnel,
+                        ports=sorted(self._forwarded_ports), detached=False,
+                    ))
+                    errors.append(error)
+            try:
+                type(self)._backend().delete_snapshot(outcome.snapshot_id)
+            except BaseException as error:
+                errors.append(error)
+            retain_fork_failure(
+                failure, snapshot_id=outcome.snapshot_id,
+                created_environment_ids=tuple(child.id for child in children),
+                pending_environment_ids=tuple(child.id for child in pending),
+                pending_sandboxes=tuple(pending), cleanup_errors=tuple(errors),
+                creation_errors=tuple(r for r in results if isinstance(r, Exception)),
+            )
             raise
         if outcome.cleanup_error is not None or cleanup_failures:
             cleanup_error = (
@@ -866,16 +908,15 @@ class Sandbox:
         )
 
     @classmethod
-    def _from_session(
+    def _session_handle(
         cls,
         session: BackendSession,
         *,
         reverse_tunnel: HttpReverseTunnel | None,
         ports: Sequence[int],
         detached: bool,
-        cleanup_failures: builtins.list[tuple[Sandbox, Exception]] | None = None,
-        rollback_created: bool = True,
     ) -> Sandbox:
+        """Build a killable local handle without remote queries or new tunnels."""
         # Bypass fresh creation: __init__ would repeat fresh-boot side effects.
         result = cls.__new__(cls)
         result._session = session
@@ -889,26 +930,48 @@ class Sandbox:
         result._forwarded_ports = set(ports)
         result._inherit_entrypoint = False
         result._id = result._session.id
+        result._image = None
+        result._cpu = result._memory = None
+        result._xpu = result._storage_mb = None
+        return result
+
+    @classmethod
+    def _from_session(
+        cls,
+        session: BackendSession,
+        *,
+        reverse_tunnel: HttpReverseTunnel | None,
+        ports: Sequence[int],
+        detached: bool,
+        cleanup_failures: builtins.list[tuple[Sandbox, BaseException]] | None = None,
+        cleanup_attempted: set[str] | None = None,
+        rollback_created: bool = True,
+    ) -> Sandbox:
+        result = cls._session_handle(
+            session, reverse_tunnel=reverse_tunnel, ports=ports, detached=detached
+        )
         try:
-            info = result._session.get_info()
+            info = session.get_info()
             result._image, result._cpu, result._memory = (
                 info.image,
                 info.cpu,
                 info.memory,
             )
             result._xpu, result._storage_mb = info.xpu, info.storage_mb
-            result._files = Filesystem(result._session.files)
-            result._commands = Commands(result._session.commands)
-            result._pty = Pty(result._id, driver=result._session.pty)
+            result._files = Filesystem(session.files)
+            result._commands = Commands(session.commands)
+            result._pty = Pty(result._id, driver=session.pty)
         except BaseException as failure:
-            retain_failure_context(failure, result._session.id)
+            retain_failure_context(failure, session.id)
+            if cleanup_attempted is not None:
+                cleanup_attempted.add(session.id)
             try:
                 if rollback_created:
-                    result._session.rollback_creation()
+                    session.rollback_creation()
                 else:
-                    result._session.close()
-            except Exception as error:
-                retain_failure_context(failure, result._session.id, error)
+                    session.close()
+            except BaseException as error:
+                retain_failure_context(failure, session.id, error)
                 if cleanup_failures is not None:
                     cleanup_failures.append((result, error))
                 logger.warning(

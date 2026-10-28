@@ -413,7 +413,7 @@ class NativeSnapshotsTest(unittest.TestCase):
         driver = adx._CommandsDriver(commands)
         with patch.object(adx.time, "sleep"):
             self.assertEqual(
-                driver.start("do-once", envs=None, cwd=None, stdin=False), 23
+                driver.start("do-once", envs=None, cwd=None, stdin=False).pid, 23
             )
         commands.run.assert_called_once()
 

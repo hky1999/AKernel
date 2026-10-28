@@ -450,7 +450,9 @@ result = handle.wait(timeout=15)
 ```
 
 Commands can be reattached by stable `command_id` (preferred) or an observed
-PID without submitting them again:
+PID without submitting them again. A returned handle binds its stable ID once;
+reusing the same PID for another command cannot redirect its identity, wait,
+stdin or kill operations. Direct PID operations remain convenience lookups:
 
 ```python
 handle = sandbox.commands.run("sleep 2; printf done", background=True)
@@ -760,6 +762,9 @@ children = []
 pending_snapshot = None
 try:
     with Sandbox(image="python:3.13-slim-bookworm") as source:
+        # Explicitly acknowledge this fresh example's unrestricted policy;
+        # older API versions omit creation ownership from their responses.
+        source.update_network_policy(None)
         source.files.write("/tmp/state", "captured")
         try:
             results = source.fork(count=3)
@@ -820,6 +825,12 @@ The count/ordered partial-result convention follows
 - E2B fork's `timeout` is an absolute child lifetime. AKernel exposes
   `idle_timeout` and named operation deadlines instead of promising a lifetime
   its backend does not implement. There is no ambiguous `timeout` alias.
+- Only a confirmed new environment's creation policy is trusted. Named reuse
+  can retain an older specification even when the constructor succeeds; missing
+  ownership confirmation and connected handles are unconfirmed too. Fork fails
+  with `NETWORK_POLICY_UNCONFIRMED` before capture until the caller successfully
+  reapplies the intended policy with `update_network_policy(policy)`. Passing
+  constructor arguments again does not prove they changed an existing sandbox.
 - Temporary snapshot deletion is requested after all creates settle. When the
   backend explicitly rejects it with `SNAPSHOT_IN_USE`/`not_started`, each child
   exposes `fork_snapshot_id`; the SDK retains the snapshot and deletes it after
@@ -841,8 +852,18 @@ lookup identity; the SDK does not initiate an extra logical attempt. An
 unconfirmed create may still exist remotely. Distinguish native lookup names
 from canonical IDs when reconciling. Confirmed-created IDs, including failures
 during native bootstrap or public binding, remain in `environment_id`; rollback
-failures remain in `cleanup_errors`. Interruption attempts to delete all known
-children and the temporary snapshot, retaining its original exception type.
+failures remain in `cleanup_errors`. Interruption, including during final
+snapshot deletion, attempts to delete every known child and the temporary
+snapshot and re-raises the original exception object/type. Reconciliation data
+on that exception includes `snapshot_id`, `created_environment_ids`,
+`pending_environment_ids`, `pending_sandboxes`, `cleanup_errors`, and
+`creation_errors`. Pending sandboxes are cleanup-only public handles: retry
+`kill()` without rebinding commands, files or tunnels. Query or connect separately
+if inspection is needed. Errors from a second interruption during cleanup are
+retained alongside other cleanup errors rather than replacing the first one.
+After releasing unresolved users, explicitly retry snapshot deletion. Unknown
+creation errors retain their lookup/request context; do not blindly delete a
+lookup name as though it were a confirmed-created ID.
 
 Run real isolation, partial-failure and cleanup acceptance on a supporting
 deployment using a complete image that contains Python 3 (not a CLI mount image):
@@ -1193,9 +1214,11 @@ sandbox.kill()             # closes local clients; remote sandbox remains
 Sandbox.delete("worker")   # terminates the named remote sandbox
 ```
 
-Creating a sandbox with an existing successful name returns that sandbox and
-its original resource allocation. Different creation arguments do not resize
-it. If local initialization fails while reusing that result, the SDK closes
+When the backend accepts creation with an existing successful name, it returns
+that sandbox and its original resource allocation; changed arguments never
+resize it. Some older deployments reject changed specifications with CONFLICT
+instead of reusing them. If local initialization fails while reusing a result,
+the SDK closes
 its local handle and preserves the original workload. Automatic rollback
 removes a remote instance only when the server confirms this create owns it.
 This applies to backend readiness and cwd setup, public facade construction,

@@ -211,7 +211,7 @@ class NativeForkTest(unittest.TestCase):
             node_id="source-node",
             network_policy=None,
         )
-        self.native = MagicMock(id="source")
+        self.native = MagicMock(id="source", newly_created=True)
         self.source = adx._Session(self.native, self.spec, self.backend._connection)
         self.capture = patch.object(
             self.source, "create_snapshot", return_value=SnapshotInfo("temporary")
@@ -413,6 +413,7 @@ class NativeForkTest(unittest.TestCase):
         patch.stopall()
         self.native = adx._OwnedSandbox.__new__(adx._OwnedSandbox)
         self.native._closed = False
+        self.native._newly_created = True
         self.native._tunnel_client = None
         self.native._sid = "source"
         from adx_environment._transport import EnvironmentClient

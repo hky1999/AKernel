@@ -26,10 +26,11 @@ from typing import Any, cast
 import adx_environment
 import httpx
 from adx_environment._transport import EnvironmentClient, EnvironmentNotFound
+from adx_environment._transport import PermissionDenied as NativePermissionDenied
 from adx_environment.commands import CommandNotFound as NativeCommandNotFound
 from adx_environment.tunnel_client import TunnelClient
 
-from .._fork import ForkCleanupError
+from .._fork import ForkCleanupError, retain_fork_failure
 from .._sandboxes import SandboxQuery
 from ..types import (
     CommandInfo,
@@ -50,6 +51,7 @@ from .base import (
     BackendConfig,
     BackendSession,
     Capability,
+    CommandReference,
     ForkOutcome,
     SandboxConnectSpec,
     SandboxSpec,
@@ -268,6 +270,8 @@ def _convert_error(operation: str, error: Exception) -> BackendOperationError:
     }.get(status if isinstance(status, int) else 0, BackendOperationError)
     if isinstance(error, EnvironmentNotFound):
         error_type = SandboxNotFoundException
+    elif isinstance(error, NativePermissionDenied):
+        error_type = PermissionDeniedException
     elif isinstance(error, NativeCommandNotFound):
         error_type = NotFoundException
     elif isinstance(
@@ -371,12 +375,30 @@ class _CommandsDriver:
     def __init__(self, commands: Any) -> None:
         self._commands = commands
         self._handles: dict[int, Any] = {}
+        self._command_handles: dict[str, Any] = {}
+
+    def _remember(self, handle: Any, pid: int) -> CommandReference:
+        identity = getattr(handle, "id", None)
+        identity = identity if isinstance(identity, str) else None
+        self._handles[pid] = handle
+        if identity is not None:
+            self._command_handles[identity] = handle
+        return CommandReference(pid, identity)
+
+    def _handle(self, command: str | int) -> Any:
+        handle = (
+            self._command_handles.get(command)
+            if isinstance(command, str) else self._handles.get(command)
+        )
+        if handle is None:
+            raise NotFoundException(f"no connected command for {command!r}")
+        return handle
 
     def command_id(self, pid: int) -> str | None:
         value = getattr(self._handles.get(pid), "id", None)
         return value if isinstance(value, str) else None
 
-    def connect(self, command: str | int) -> int:
+    def connect(self, command: str | int) -> CommandReference:
         try:
             identity = command
             if isinstance(command, int):
@@ -390,8 +412,7 @@ class _CommandsDriver:
             pid = handle.pid
             if pid is None or pid <= 0:
                 raise BackendOperationError("connected command has no assigned PID")
-            self._handles[int(pid)] = handle
-            return int(pid)
+            return self._remember(handle, int(pid))
         except Exception as error:
             raise _convert_error("connect command", error) from error
 
@@ -426,7 +447,7 @@ class _CommandsDriver:
         envs: Mapping[str, str] | None,
         cwd: str | None,
         stdin: bool,
-    ) -> int:
+    ) -> CommandReference:
         try:
             handle = self._commands.run(
                 cmd,
@@ -454,29 +475,31 @@ class _CommandsDriver:
             pid = int(pid)
         except Exception as error:
             raise _convert_error("background command start", error) from error
-        self._handles[pid] = handle
-        return pid
+        return self._remember(handle, pid)
 
-    def wait(self, pid: int, timeout: int | None) -> CommandResult:
-        handle = self._handles.get(pid)
-        if handle is None:
-            raise BackendOperationError(f"no command handle for pid {pid}")
+    def wait(self, command: str | int, timeout: int | None) -> CommandResult:
+        handle = self._handle(command)
         try:
             return _command_result(handle.wait(timeout))
         except Exception as error:
-            raise _convert_error(f"wait for process {pid}", error) from error
+            raise _convert_error(f"wait for command {command!r}", error) from error
 
-    def kill(self, pid: int) -> bool:
+    def kill(self, command: str | int) -> bool:
         try:
-            return bool(self._commands.kill(pid))
+            if isinstance(command, str):
+                return bool(self._handle(command).kill())
+            return bool(self._commands.kill(command))
         except Exception as error:
-            raise _convert_error(f"kill process {pid}", error) from error
+            raise _convert_error(f"kill command {command!r}", error) from error
 
-    def send_stdin(self, pid: int, data: str, eof: bool) -> None:
+    def send_stdin(self, command: str | int, data: str, eof: bool) -> None:
         try:
-            self._commands.send_stdin(pid, data, eof)
+            if isinstance(command, str):
+                self._handle(command).send_stdin(data, eof)
+            else:
+                self._commands.send_stdin(command, data, eof)
         except Exception as error:
-            raise _convert_error(f"send stdin to process {pid}", error) from error
+            raise _convert_error(f"send stdin to command {command!r}", error) from error
 
     def list(self) -> list[CommandInfo]:
         try:
@@ -606,7 +629,12 @@ class _Session:
         self._terminated = False
         self._closed = False
         self._network_policy = spec.network_policy
-        self._network_policy_known = not isinstance(spec, SandboxConnectSpec)
+        # A successful named create can return an existing environment without
+        # applying this request's policy. Missing ownership is unconfirmed too.
+        self._network_policy_known = (
+            not isinstance(spec, SandboxConnectSpec)
+            and getattr(sandbox, "newly_created", False) is True
+        )
         self._fork_snapshot: _ForkSnapshotLease | None = None
 
     @property
@@ -698,7 +726,6 @@ class _Session:
         snapshot = self.create_snapshot(None, snapshot_timeout)
         results: list[BackendSession | Exception] = []
         cleanup_error: Exception | None = None
-        interrupted = False
         try:
             spec = SnapshotRestoreSpec(
                 snapshot_id=snapshot.snapshot_id,
@@ -724,22 +751,6 @@ class _Session:
                     results.append(AdxBackend._restore_snapshot(spec, self._connection))
                 except Exception as error:
                     results.append(error)
-        except BaseException:
-            interrupted = True
-            # No result handles reach the caller on interruption. Release only
-            # children whose identities are known; never touch the source.
-            for child in results:
-                if not isinstance(child, Exception):
-                    try:
-                        child.terminate()
-                    except Exception:
-                        logger.warning(
-                            "failed to clean interrupted fork child %s",
-                            child.id,
-                            exc_info=True,
-                        )
-            raise
-        finally:
             try:
                 AdxBackend._delete_snapshot(snapshot.snapshot_id, self._connection)
             except Exception as error:
@@ -747,8 +758,7 @@ class _Session:
                     child for child in results if not isinstance(child, Exception)
                 ]
                 if (
-                    not interrupted
-                    and children
+                    children
                     and isinstance(error, BackendOperationError)
                     and error.code == "SNAPSHOT_IN_USE"
                     and error.outcome == "not_started"
@@ -766,7 +776,47 @@ class _Session:
                         snapshot.snapshot_id,
                         exc_info=True,
                     )
+        except BaseException as failure:
+            # This scope includes the final delete: interruption there must not
+            # strand all successfully created children without returning IDs.
+            self._cleanup_interrupted_fork(failure, snapshot.snapshot_id, results)
+            raise
         return ForkOutcome(snapshot.snapshot_id, results, cleanup_error)
+
+    def _cleanup_interrupted_fork(
+        self,
+        failure: BaseException,
+        snapshot_id: str,
+        results: list[BackendSession | Exception],
+    ) -> None:
+        children = [child for child in results if not isinstance(child, Exception)]
+        pending: list[BackendSession] = []
+        errors: list[BaseException] = []
+        for child in children:
+            try:
+                child.terminate()
+            except BaseException as error:
+                pending.append(child)
+                errors.append(error)
+                logger.warning(
+                    "failed to clean interrupted fork child %s", child.id,
+                    exc_info=True,
+                )
+        try:
+            AdxBackend._delete_snapshot(snapshot_id, self._connection)
+        except BaseException as error:
+            errors.append(error)
+        retain_fork_failure(
+            failure, snapshot_id=snapshot_id,
+            created_environment_ids=tuple(child.id for child in children),
+            pending_environment_ids=tuple(child.id for child in pending),
+            cleanup_errors=tuple(errors),
+            creation_errors=tuple(r for r in results if isinstance(r, Exception)),
+        )
+        # The public facade converts these neutral sessions to cleanup handles
+        # without querying or binding new transports, then removes this field.
+        context: Any = failure
+        context._fork_pending_sessions = tuple(pending)
 
     def reload(self) -> bool:
         if self._terminated or self._closed:
