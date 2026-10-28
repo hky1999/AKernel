@@ -162,7 +162,7 @@ class SnapshotCreateTest(unittest.TestCase):
         failure = BackendOperationError("metadata unavailable", request_id="metadata")
         cleanup = BackendOperationError("delete unavailable", request_id="rollback")
         self.session.get_info.side_effect = failure
-        self.session.terminate.side_effect = cleanup
+        self.session.rollback_creation.side_effect = cleanup
         with self.assertLogs(public.logger, level="WARNING"):
             with self.assertRaises(BackendOperationError) as raised:
                 Sandbox.create("saved")
@@ -171,7 +171,7 @@ class SnapshotCreateTest(unittest.TestCase):
         self.assertEqual(failure.cleanup_errors, (cleanup,))
         self.assertEqual(failure.request_id, "metadata")
         self.backend.from_snapshot.assert_called_once()
-        self.session.terminate.assert_called_once()
+        self.session.rollback_creation.assert_called_once()
 
     def test_subclass_is_preserved_without_fresh_constructor(self):
         class ChildSandbox(Sandbox):
