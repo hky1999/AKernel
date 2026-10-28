@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import shlex
@@ -12,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Event
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import yaml
@@ -24,7 +26,7 @@ from ._backends.errors import (
 from ._docker_runtime import DockerRuntime
 from ._image_plan import ImageMountPlan
 from ._image_resolver import prepare_compose_images
-from .types import CommandResult, Mount
+from .types import CommandResult, HttpReverseTunnel, Mount
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -116,7 +118,7 @@ class ComposeProject:
         auto_images: bool = False,
         output_dir: str | Path | None = None,
         environment: Mapping[str, str] | None = None,
-        network: str = "host",
+        network: str = "bridge",
         buildkit: bool = True,
         prebuilt_images: Mapping[str, str] | None = None,
         remote_directory: str = "/opt/akernel-compose/project",
@@ -297,6 +299,19 @@ class ComposeProject:
                 check=True,
             )
 
+    def reconnect_network(self) -> None:
+        """Rebind managed egress rules after restoring to a new outer TAP.
+
+        Call after attach and before resuming work. Does not start a daemon,
+        build/up a project, replace containers or recreate tunnel listeners.
+        Only SDK-owned IPv4 forwarding/NAT chains can change. Inner network
+        identities and existing connections inside the sandbox remain intact;
+        connections to external peers do not gain IP-migration guarantees.
+        """
+        DockerRuntime.reconnect_network(
+            self._require_sandbox(), network=self._descriptor["network"]
+        )
+
     def command(self, args: Sequence[str]) -> str:
         if not args:
             raise ValueError("Compose subcommand is required")
@@ -457,6 +472,123 @@ class ServiceHandle:
         )
         data = json.loads(result.stdout)[0]
         return {"container_id": data["Id"], "started_at": data["State"]["StartedAt"]}
+
+    def expose_tunnel(self, tunnel: HttpReverseTunnel) -> str:
+        """Return this service's reachable URL for an outer reverse tunnel.
+
+        Host-network services use the existing loopback listener. For bridge
+        networks, a private TCP relay binds only to an attached gateway and
+        accepts only this service's IP. HTTP, credentials and SSE pass through
+        unchanged. The daemon and descriptor survive whole-sandbox snapshots;
+        attach never restarts a relay. Requires IPv4 on one attached network.
+        An ambiguous launch is never retried automatically.
+        """
+        if not isinstance(tunnel, HttpReverseTunnel):
+            raise TypeError("tunnel must be an HttpReverseTunnel")
+        identity = self.identity()
+        key = f"{self.name}:{tunnel.listen_port}"
+        endpoints = self.project._descriptor.setdefault("tunnel_endpoints", {})
+        if key in endpoints:
+            record = endpoints[key]
+            if any(record[k] != identity[k] for k in identity):
+                raise BackendOperationError(
+                    "Tunnel service was replaced or restarted",
+                    code="SERVICE_TUNNEL_STALE",
+                    outcome="not_started",
+                )
+            if "url" not in record:
+                raise BackendOperationError(
+                    "Tunnel launch outcome unknown; do not resubmit",
+                    code="SERVICE_TUNNEL_UNKNOWN",
+                    outcome="unknown",
+                )
+            return str(record["url"])
+        if self.project._runtime is None:
+            raise RuntimeError("Restored projects can only attach existing tunnels")
+        sandbox = self.project._require_sandbox()
+        result = sandbox.commands.run(
+            shlex.join(["docker", "inspect", identity["container_id"]]),
+            timeout=20,
+            check=True,
+        )
+        data = json.loads(result.stdout)[0]
+        if data["HostConfig"]["NetworkMode"] == "host":
+            endpoints[key] = {**identity, "url": tunnel.url}
+            return tunnel.url
+        networks = data["NetworkSettings"].get("Networks") or {}
+        connected = []
+        for name, value in sorted(networks.items()):
+            if not value.get("IPAddress"):
+                continue
+            gateway = value.get("Gateway")
+            if not gateway:
+                # Internal Docker networks intentionally omit a default route;
+                # their local bridge gateway can still host a controlled tunnel.
+                inspect = sandbox.commands.run(
+                    shlex.join(["docker", "network", "inspect", name]),
+                    timeout=20,
+                    check=True,
+                )
+                config = json.loads(inspect.stdout)[0]["IPAM"]["Config"]
+                gateway = next(
+                    (
+                        v["Gateway"]
+                        for v in config
+                        if v.get("Gateway") and ":" not in v["Gateway"]
+                    ),
+                    None,
+                )
+            if gateway:
+                connected.append({"Gateway": gateway, "IPAddress": value["IPAddress"]})
+        if not connected:
+            raise ValueError("Service tunnel requires an attached IPv4 bridge network")
+        network = connected[0]
+        address = str(ipaddress.IPv4Address(network["Gateway"]))
+        peer = str(ipaddress.IPv4Address(network["IPAddress"]))
+        if (
+            ipaddress.IPv4Address(address).is_unspecified
+            or ipaddress.IPv4Address(address).is_loopback
+        ):
+            raise ValueError("Service tunnel requires a non-loopback bridge gateway")
+        operation_id = uuid4().hex
+        # Reserve before dispatch so a lost reply cannot create a second relay.
+        record = {**identity, "operation_id": operation_id}
+        endpoints[key] = record
+        script = Path(__file__).with_name("_docker_network_guest.py").read_text()
+        result = sandbox.commands.run(
+            shlex.join(
+                [
+                    "python3",
+                    "-c",
+                    script,
+                    "expose",
+                    "/opt/akernel-docker-runtime/tunnels/" + operation_id,
+                    json.dumps(
+                        {
+                            "address": address,
+                            "allowed": [peer],
+                            "target_port": tunnel.listen_port,
+                        }
+                    ),
+                ]
+            ),
+            timeout=20,
+            check=True,
+        )
+        value = json.loads(result.stdout)
+        url = urlsplit(value["url"])
+        if (
+            url.scheme != "http"
+            or url.hostname != address
+            or not url.port
+            or url.username
+            or url.path
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError("Runtime returned an invalid service tunnel endpoint")
+        record["url"] = value["url"]
+        return str(record["url"])
 
     def _args(
         self,

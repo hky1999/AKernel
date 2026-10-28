@@ -112,7 +112,7 @@ class DockerRuntimeTest(unittest.TestCase):
         runtime = DockerRuntime(
             images=ImageMountPlan.load(self.plan()), bridge_binary=binary
         )
-        runtime.start(sandbox)
+        runtime.start(sandbox, network="host")
         commands = [c.args[0] for c in sandbox.commands.run.call_args_list]
         start = next(i for i, c in enumerate(commands) if "start.py --root" in c)
         docker = next(i for i, c in enumerate(commands) if "dockerd --config-file" in c)

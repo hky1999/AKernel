@@ -29,6 +29,7 @@ class ComposeTest(unittest.TestCase):
         )
 
     def prepare(self, **kwargs):
+        kwargs.setdefault("network", "host")
         return ComposeProject.prepare(
             self.context, [self.file], output_dir=self.root / "prepared", **kwargs
         )

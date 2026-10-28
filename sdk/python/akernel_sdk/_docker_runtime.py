@@ -135,7 +135,7 @@ class DockerRuntime:
             raise ValueError("Image bridge returned invalid Docker arguments")
         return flags
 
-    def start(self, sandbox: Sandbox, *, network: str = "host") -> None:
+    def start(self, sandbox: Sandbox, *, network: str = "bridge") -> None:
         """Start bridge, containerd and dockerd once; caller owns sandbox cleanup.
 
         Never call on a connected/restored sandbox. Fail closed on an existing
@@ -148,12 +148,20 @@ class DockerRuntime:
         if network == "host":
             flags += ["--iptables=false", "--ip6tables=false", "--bridge=none"]
         else:
-            flags += [
-                "--bip=172.30.0.1/24",
-                "--default-address-pool=base=172.31.0.0/16,size=24",
-            ]
+            # gVisor supports legacy SNAT, but not all of Docker's netfilter
+            # matchers. Keep Docker's bridges/IPAM/DNS and userland port proxies;
+            # configure forwarding inside this sandbox rather than rewriting
+            # service networks or installing rules on the node.
+            script = Path(__file__).with_name("_docker_network_guest.py").read_text()
+            sandbox.commands.run(
+                shlex.join(["python3", "-c", script, "bootstrap"]),
+                timeout=20,
+                check=True,
+            )
+            flags += ["--iptables=false", "--ip6tables=false", "--userland-proxy=true"]
         sandbox.commands.run(
-            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
+            "PATH=/opt/akernel-docker-runtime/network-bin:"
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "
             + shlex.join(["dockerd", *flags])
             + " > /var/log/akernel-dockerd.log 2>&1",
             background=True,
@@ -171,3 +179,21 @@ class DockerRuntime:
         raise RuntimeError(
             "Docker daemon readiness failed; inspect /var/log/akernel-dockerd.log"
         )
+
+    @staticmethod
+    def reconnect_network(sandbox: Sandbox, *, network: str = "bridge") -> None:
+        """Refresh owned egress rules after a new outer TAP is assigned.
+
+        Call after snapshot restore, before resuming work. This never starts
+        dockerd, containers, image helpers or listeners. It preserves inner
+        connections; external connections do not gain IP-migration guarantees.
+        """
+        if network not in {"host", "bridge"}:
+            raise ValueError("Docker network must be host or bridge")
+        if network == "bridge":
+            script = Path(__file__).with_name("_docker_network_guest.py").read_text()
+            sandbox.commands.run(
+                shlex.join(["python3", "-c", script, "reconnect"]),
+                timeout=20,
+                check=True,
+            )
