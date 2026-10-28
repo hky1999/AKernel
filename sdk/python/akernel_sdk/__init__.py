@@ -15,6 +15,12 @@
 """Public API for the AKernel Python SDK."""
 
 import importlib
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ._docker_runtime import DockerRuntime as DockerRuntime
+    from ._image_plan import ImageMountPlan as ImageMountPlan
+    from ._image_resolver import prepare_compose_images as prepare_compose_images
 
 from ._backends.errors import (
     AuthenticationException,
@@ -93,6 +99,9 @@ __all__ = [
     "ServiceBusyException",
     "CommandExitException",
     "ForkCleanupError",
+    "DockerRuntime",
+    "ImageMountPlan",
+    "prepare_compose_images",
     "DockerContext",
     "DockerfileLaunch",
     "DockerContextEntry",
@@ -109,6 +118,9 @@ __all__ = [
 ]
 
 _LAZY_IMPORTS = {
+    "DockerRuntime": ("._docker_runtime", "DockerRuntime"),
+    "ImageMountPlan": ("._image_plan", "ImageMountPlan"),
+    "prepare_compose_images": ("._image_resolver", "prepare_compose_images"),
     "Client": ("._client", "Client"),
     "Sandbox": (".sandbox", "Sandbox"),
     "CommandHandle": (".commands", "CommandHandle"),

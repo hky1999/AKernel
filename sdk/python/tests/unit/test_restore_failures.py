@@ -62,6 +62,7 @@ class RestoreFailureTest(unittest.TestCase):
 
         def capture_create(native, _body):
             self.native = native
+            native._newly_created = True
             return {"environmentId": "known-child"}
 
         self.capture_create = capture_create
@@ -115,7 +116,7 @@ class RestoreFailureTest(unittest.TestCase):
         delete.assert_called_once_with("known-child")
 
     def test_route_probe_interrupt_cleans_initialized_session(self):
-        native = MagicMock(id="known-child")
+        native = MagicMock(id="known-child", newly_created=True)
         native.commands.list.side_effect = KeyboardInterrupt()
         with (
             patch.object(adx._OwnedSandbox, "create", return_value=native),
@@ -190,7 +191,7 @@ class RestoreFailureTest(unittest.TestCase):
         session.id = "known-child"
         failure = KeyboardInterrupt()
         cleanup, close = RuntimeError("delete"), RuntimeError("close")
-        session.terminate.side_effect = cleanup
+        session.rollback_creation.side_effect = cleanup
         session.close.side_effect = close
         with (
             patch.object(public, "load_backend", return_value=backend),
@@ -204,7 +205,7 @@ class RestoreFailureTest(unittest.TestCase):
         self.assertEqual(failure.cleanup_errors, (cleanup, close))
 
     def test_session_initialization_failure_cleans_created_sandbox(self):
-        native = MagicMock(id="known-child")
+        native = MagicMock(id="known-child", newly_created=True)
         failure = KeyboardInterrupt("binding session")
         with (
             patch.object(adx._OwnedSandbox, "create", return_value=native),
@@ -221,7 +222,7 @@ class RestoreFailureTest(unittest.TestCase):
         )
 
     def test_session_initialization_keeps_close_and_delete_failures(self):
-        native = MagicMock(id="known-child")
+        native = MagicMock(id="known-child", newly_created=True)
         failure = RuntimeError("binding session")
         close_error, delete_error = RuntimeError("close"), RuntimeError("delete")
         native.close.side_effect = close_error

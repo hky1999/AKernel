@@ -231,10 +231,22 @@ class NativeSnapshotsTest(unittest.TestCase):
             patch.object(httpx.Client, "send", autospec=True, side_effect=deny),
             self.assertRaises(BackendOperationError) as raised,
         ):
-            Sandbox.from_snapshot("saved", cwd="/app", node_id="node-a")
+            Sandbox.from_snapshot(
+                "saved",
+                cwd="/app",
+                node_id="node-a",
+                extra_config={
+                    "fileBackedTmpfsMounts": [
+                        {"target": "/var/lib/akernel-image-snapshots", "sizeMB": 2048}
+                    ]
+                },
+            )
         self.assertEqual(len(requests), 1)
         body = json.loads(requests[0].content)
         self.assertEqual(body["snapshotId"], "saved")
+        self.assertEqual(
+            body["extra_config"]["fileBackedTmpfsMounts"][0]["sizeMB"], 2048
+        )
         for key in (
             "cpu",
             "memory",
@@ -365,7 +377,7 @@ class NativeSnapshotsTest(unittest.TestCase):
             native._client.close()
 
     def test_restore_waits_for_route_without_replaying_create(self):
-        native = MagicMock(id="clone")
+        native = MagicMock(id="clone", newly_created=True)
         error = adx.adx_environment.EnvironmentError("not ready")
         error.status_code = 503
         native.commands.list.side_effect = [error, []]
@@ -387,7 +399,7 @@ class NativeSnapshotsTest(unittest.TestCase):
             sb.kill()
 
     def test_readiness_failure_cleans_clone_without_repeating_restore(self):
-        native = MagicMock(id="clone")
+        native = MagicMock(id="clone", newly_created=True)
         native.commands.list.side_effect = ValueError("bad response")
         with (
             patch.object(adx._OwnedSandbox, "create", return_value=native) as create,

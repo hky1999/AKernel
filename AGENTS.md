@@ -851,3 +851,7 @@ ADX profile, applying patches only to present roles. Resolve profile/role
 selectors with ADX's single-pass environment/default/escape rules while
 preserving source expressions for the authoritative loader. Severity queries consume
 Collector-normalized log metadata and plain bodies.
+
+## Managed Docker runtime
+
+The source-preview SDK owns Compose image discovery/OCI metadata validation, ROFS mount plans and guest bridge/containerd/dockerd startup. Sources live in `builder/image-bridge`, `builder/dind`, and `sdk/python/akernel_sdk/_docker_runtime.py`. Callers supply original project files and keep service orchestration in their adapter. Snapshot restore must rebind mounts, runtime extra_config and local tunnels without rerunning startup. Reuse the existing sandboxd image provider; do not add a parallel layer cache or modify deployment/runtime pins for client refactoring. See the SDK and builder guides for managed-upper prerequisites and supported scope.

@@ -870,6 +870,7 @@ class _Session:
                 command_cwd=self._spec.command_cwd,
                 port_forwardings=self._spec.port_forwardings,
                 mounts=self._spec.mounts,
+                extra_config=getattr(self._spec, "extra_config", {}),
                 reverse_tunnel=self._spec.reverse_tunnel,
                 detached=False,
                 failover=self._spec.failover,
@@ -1048,6 +1049,7 @@ class _ConstructionClient:
     def __init__(self, client: Any, newly_created: bool) -> None:
         self.client = client
         self.newly_created = newly_created
+        self.deleted = False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.client, name)
@@ -1055,6 +1057,7 @@ class _ConstructionClient:
     def delete(self, environment_id: str) -> None:
         if self.newly_created:
             self.client.delete(environment_id)
+            self.deleted = True
 
 
 class _OwnedSandbox(adx_environment.Environment):
@@ -1078,11 +1081,22 @@ class _OwnedSandbox(adx_environment.Environment):
                         cleanup()
                     except Exception as cleanup_error:
                         retain_failure_context(error, identity, cleanup_error)
-            if identity and self._newly_created:
+            guarded = getattr(self, "_client", None)
+            already_deleted = (
+                isinstance(guarded, _ConstructionClient) and guarded.deleted
+            )
+            if identity and self._newly_created and not already_deleted:
                 try:
-                    adx_environment.Environment.delete(identity, connection=kwargs.get("connection"))
+                    adx_environment.Environment.delete(
+                        identity, connection=kwargs.get("connection")
+                    )
                 except Exception as cleanup_error:
                     retain_failure_context(error, identity, cleanup_error)
+                    logger.warning(
+                        "failed to roll back constructing sandbox %s",
+                        identity,
+                        exc_info=True,
+                    )
             raise
         finally:
             if isinstance(getattr(self, "_client", None), _ConstructionClient):
@@ -1090,7 +1104,10 @@ class _OwnedSandbox(adx_environment.Environment):
 
     def _create(self, body: dict[str, Any]) -> dict[str, Any]:
         fields = self._sdk_create_fields
-        for key, feature in (("metadata", "environment-metadata-v1"), ("lifetimeTimeoutSeconds", "environment-lifetime-v1")):
+        for key, feature in (
+            ("metadata", "environment-metadata-v1"),
+            ("lifetimeTimeoutSeconds", "environment-lifetime-v1"),
+        ):
             if key in fields:
                 _require_control_feature(self._client, feature)
         result = super()._create({**body, **fields})
@@ -1129,7 +1146,9 @@ def _rollback_created(
         return
     cleanups = [sandbox.close]
     if sandbox.newly_created is True:
-        cleanups.append(lambda: adx_environment.Environment.delete(identity, connection=connection))
+        cleanups.append(
+            lambda: adx_environment.Environment.delete(identity, connection=connection)
+        )
     for cleanup in cleanups:
         try:
             cleanup()
@@ -1460,6 +1479,7 @@ class AdxBackend:
                 cwd=spec.command_cwd,
                 port_forwardings=list(spec.port_forwardings),
                 mounts=[_native_mount(mount) for mount in spec.mounts],
+                extra_config=dict(spec.extra_config),
                 upstream=tunnel.target if tunnel else None,
                 proxy_port=tunnel.listen_port if tunnel else _DEFAULT_LISTEN_PORT,
                 tunnel_connect_timeout=tunnel.connect_timeout if tunnel else None,

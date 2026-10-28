@@ -1364,3 +1364,50 @@ results retain `outcome="unknown"` and `retry="same_operation"`; preserve the
 original identity when querying or retrying. Do not infer execution or cleanup
 from a timeout message. `status_code` describes the service failure (including
 an SSE final event's error code); it need not equal the stream's HTTP status.
+
+
+### Managed Docker/Compose runtime (source preview)
+
+This API requires the SDK source revision containing managed Docker support; published `0.2.0rc3` does not provide it. It builds on reusable snapshots in PR #118. Prepare a compatible runsc deployment with sandboxd managed file-backed tmpfs support. Select reflink checkpoint mode and durable sync in deployment configuration; the SDK never modifies cluster settings. See [runtime prerequisites](../../builder/image-bridge/README.md).
+
+```python
+from pathlib import Path
+from akernel_sdk import DockerRuntime, Sandbox, prepare_compose_images
+
+images = prepare_compose_images(
+    "./project", ["./project/docker-compose.yaml"],
+    output_dir="./diagnostics/images",
+    bridge_binary="/opt/tools/akernel-image-bridge",
+)
+runtime = DockerRuntime(
+    images=images, bridge_binary=Path("/opt/tools/akernel-image-bridge"),
+    writable_mb=2048, writable_backing="file",
+)
+sandbox = Sandbox(
+    image="<compatible-dind-runtime-image>", cpu=4000, memory=8192,
+    storage_mb=30720, cwd="/", failover=False,
+    **runtime.sandbox_options(),
+)
+try:
+    runtime.start(sandbox, network="host")
+    # Upload the original project; run ordinary docker compose build/up here.
+    # Quiesce tools and synchronize any client-side harness state before saving.
+    snapshot = sandbox.create_snapshot(timeout=300)
+    restored = Sandbox.from_snapshot(
+        snapshot, cwd="/", failover=False, **runtime.sandbox_options(),
+        # Explicitly rebind any reverse_tunnel and current network_policy here.
+    )
+    try:
+        print(restored.commands.run("docker ps", check=True).stdout)
+        # Continue using restored, which wraps the captured processes. Do not
+        # call runtime.start(), rerun builds, or restart the agent command.
+    finally:
+        restored.kill()
+        Sandbox.delete_snapshot(snapshot.snapshot_id)
+finally:
+    sandbox.kill()
+```
+
+The SDK prepares manifest/config metadata only. Sandboxd's existing OCI/ROFS image manager supplies immutable shared lower roots; containerd uses a private managed upper. Credentials for metadata discovery and node layer fetching are separate. No task image build/push or user image plan is required. Original definitions are read without rewriting them. Host-network compatibility is limited to the qualified Linux/amd64 profile described above; Harbor continues to own its normal service, bind, resource and verifier overlays.
+
+`from_snapshot(..., extra_config=...)` and `create(snapshot_id=..., extra_config=...)` forward validated, defensively copied runtime configuration. Supply the same managed-upper geometry and image mounts on restore. Native ADX DTOs, client connection/TLS handling and reconstructed commands/files/tunnel handles stay inside the SDK. Snapshot restore does not capture local Python harness state or external services; callers own alignment, fencing the previous execution and deleting snapshots.
