@@ -170,7 +170,7 @@ class RestoreFailureTest(unittest.TestCase):
         failure = BackendOperationError("metadata unavailable", request_id="metadata")
         cleanup = BackendOperationError("delete unavailable", request_id="rollback")
         session.get_info.side_effect = failure
-        session.terminate.side_effect = cleanup
+        session.rollback_creation.side_effect = cleanup
         backend = MagicMock()
         backend.from_snapshot.return_value = session
         with (

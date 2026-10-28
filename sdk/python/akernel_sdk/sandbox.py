@@ -937,7 +937,7 @@ class Sandbox:
             retain_failure_context(failure, result._session.id)
             try:
                 if rollback_created:
-                    result._session.terminate()
+                    result._session.rollback_creation()
                 else:
                     result._session.close()
             except Exception as error:

@@ -82,7 +82,7 @@ class PublicSnapshotsTest(unittest.TestCase):
         with self.assertRaises(BackendOperationError) as raised:
             Sandbox.from_snapshot("saved")
         self.assertIs(raised.exception, failure)
-        self.session.terminate.assert_called_once()
+        self.session.rollback_creation.assert_called_once()
         self.backend.create.assert_not_called()
 
     def test_ambiguous_restore_is_not_replayed(self):
@@ -206,6 +206,22 @@ class NativeSnapshotsTest(unittest.TestCase):
             True,
         )
         self.backend = adx.AdxBackend(self.config)
+
+    def test_restore_facade_failure_preserves_reused_named_workload(self):
+        for owned in (True, False):
+            with self.subTest(newly_created=owned):
+                native = MagicMock(id="shared", newly_created=owned)
+                native.commands.list.return_value = []
+                native.get_info.side_effect = ValueError("metadata unavailable")
+                with (
+                    patch.object(adx._OwnedSandbox, "create", return_value=native),
+                    patch.object(adx.adx_environment.Environment, "delete") as delete,
+                    patch.object(public, "load_backend", return_value=self.backend),
+                    self.assertRaises(BackendOperationError),
+                ):
+                    Sandbox.from_snapshot("saved", name="shared")
+                self.assertEqual(delete.call_count, int(owned))
+                native.close.assert_called_once()
 
     def test_restore_wire_has_no_fresh_boot_resources_and_preserves_error(self):
         requests = []

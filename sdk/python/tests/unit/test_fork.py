@@ -41,6 +41,7 @@ from akernel_sdk._backends.base import (
 
 def child(identity):
     session = MagicMock(id=identity)
+    session.rollback_creation.side_effect = session.terminate
     session.get_info.return_value = SandboxInfo(
         identity, "running", 1250, 2048, "captured-image"
     )
