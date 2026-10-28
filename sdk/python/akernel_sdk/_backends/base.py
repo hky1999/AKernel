@@ -22,6 +22,7 @@ from enum import Enum, auto
 from typing import Any, Protocol
 
 from .._addresses import Endpoint
+from .._sandboxes import SandboxQuery
 from ..types import (
     CommandInfo,
     CommandResult,
@@ -31,6 +32,7 @@ from ..types import (
     NetworkPolicy,
     S3Config,
     SandboxInfo,
+    SnapshotInfo,
 )
 
 
@@ -81,6 +83,55 @@ class SandboxSpec:
     storage_limit_mb: int
     network_policy: NetworkPolicy | None
     extra_config: Mapping[str, object]
+    create_timeout: int | None = None
+    metadata: Mapping[str, str] = field(default_factory=dict)
+    lifetime_timeout: int | None = None
+
+
+@dataclass(frozen=True)
+class SnapshotRestoreSpec:
+    """Restore inputs, deliberately excluding fresh-boot resource defaults."""
+
+    snapshot_id: str
+    idle_timeout: int
+    schedule_timeout: int
+    timeout: int
+    name: str | None
+    command_cwd: str | None
+    port_forwardings: tuple[int, ...]
+    mounts: tuple[Mount, ...]
+    reverse_tunnel: HttpReverseTunnel | None
+    detached: bool
+    failover: bool
+    node_id: str | None
+    network_policy: NetworkPolicy | None
+    xpu: str | None = None
+    storage_mb: int | None = None
+    inherit_entrypoint: bool = False
+    metadata: Mapping[str, str] = field(default_factory=dict)
+    lifetime_timeout: int | None = None
+
+
+@dataclass(frozen=True)
+class SandboxConnectSpec:
+    """Local attachment options; never fresh-boot or change remote resources."""
+
+    environment_id: str
+    timeout: int
+    command_cwd: str | None
+    port_forwardings: tuple[int, ...]
+    reverse_tunnel: HttpReverseTunnel | None
+    detached: bool
+    idle_timeout: int = 300
+    schedule_timeout: int = 30
+    network_policy: NetworkPolicy | None = None
+    mounts: tuple[Mount, ...] = ()
+    xpu: str | None = None
+    storage_mb: int | None = None
+    inherit_entrypoint: bool = False
+    failover: bool = False
+    metadata: Mapping[str, str] = field(default_factory=dict)
+    lifetime_timeout: int | None = None
 
 
 class CommandsDriver(Protocol):
@@ -93,6 +144,7 @@ class CommandsDriver(Protocol):
         envs: Mapping[str, str] | None,
         cwd: str | None,
         timeout: int,
+        user: str | None = None,
     ) -> CommandResult: ...
 
     def start(
@@ -102,6 +154,8 @@ class CommandsDriver(Protocol):
         envs: Mapping[str, str] | None,
         cwd: str | None,
         stdin: bool,
+        user: str | None = None,
+        execution_timeout: int | None = None,
     ) -> int: ...
 
     def wait(self, pid: int, timeout: int | None) -> CommandResult: ...
@@ -111,6 +165,26 @@ class CommandsDriver(Protocol):
     def send_stdin(self, pid: int, data: str, eof: bool) -> None: ...
 
     def list(self) -> list[CommandInfo]: ...
+
+    def connect(self, command: str | int) -> int: ...
+
+    def command_id(self, pid: int) -> str | None: ...
+
+    def require_output(self) -> None: ...
+
+    def output(
+        self, pid: int, stdout_offset: int, stderr_offset: int
+    ) -> CommandOutput: ...
+
+
+@dataclass(frozen=True)
+class CommandOutput:
+    stdout: bytes
+    stderr: bytes
+    stdout_offset: int
+    stderr_offset: int
+    terminal: bool
+    has_more: bool
 
 
 class FilesystemDriver(Protocol):
@@ -170,6 +244,20 @@ class BackendSession(Protocol):
 
     def get_info(self) -> SandboxInfo: ...
 
+    def pause(self, timeout: int) -> bool: ...
+
+    def set_timeout(self, timeout: int) -> None: ...
+
+    def create_snapshot(self, name: str | None, timeout: int) -> SnapshotInfo: ...
+
+    def fork(
+        self,
+        count: int,
+        idle_timeout: int | None,
+        snapshot_timeout: int,
+        restore_timeout: int | None,
+    ) -> ForkOutcome: ...
+
     def reload(self) -> bool: ...
 
     def wait_entrypoint(self) -> int: ...
@@ -188,6 +276,15 @@ class BackendSession(Protocol):
     def close(self) -> None: ...
 
 
+@dataclass
+class ForkOutcome:
+    """Known child results and acknowledgement of temporary snapshot deletion."""
+
+    snapshot_id: str
+    results: list[BackendSession | Exception]
+    cleanup_error: Exception | None = None
+
+
 class Backend(Protocol):
     """Process-level backend factory and shared resource owner."""
 
@@ -196,6 +293,26 @@ class Backend(Protocol):
     capabilities: frozenset[Capability]
 
     def create(self, spec: SandboxSpec) -> BackendSession: ...
+
+    def from_snapshot(self, spec: SnapshotRestoreSpec) -> BackendSession: ...
+
+    def connect(self, spec: SandboxConnectSpec) -> BackendSession: ...
+
+    def get_sandbox(self, sandbox_id: str) -> SandboxInfo: ...
+
+    def delete_sandbox(self, sandbox_id: str) -> bool: ...
+
+    def list_sandboxes(
+        self, query: SandboxQuery, next_token: str | None, limit: int
+    ) -> tuple[list[SandboxInfo], str | None]: ...
+
+    def get_snapshot(self, snapshot_id: str) -> SnapshotInfo: ...
+
+    def list_snapshots(
+        self, name: str | None, next_token: str | None, limit: int | None
+    ) -> tuple[list[SnapshotInfo], str | None]: ...
+
+    def delete_snapshot(self, snapshot_id: str) -> None: ...
 
     def pty_for(self, instance_id: str) -> PtyDriver: ...
 

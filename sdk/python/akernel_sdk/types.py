@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -100,6 +101,27 @@ def _normalize_cidr(value: str) -> str:
     if network.version != 4:
         raise ValueError(f"invalid IPv4 address or CIDR: {value!r}")
     return str(network)
+
+
+@dataclass(frozen=True)
+class SnapshotInfo:
+    """A reusable memory/filesystem snapshot, independent of its source sandbox.
+
+    Only metadata supplied by the backend is exposed. A snapshot ID is opaque;
+    names are labels and are not interchangeable with the ID.
+    """
+
+    snapshot_id: str
+    names: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.snapshot_id, str) or not self.snapshot_id.strip():
+            raise ValueError("snapshot_id must be a non-empty string")
+        if isinstance(self.names, (str, bytes)) or not all(
+            isinstance(name, str) for name in self.names
+        ):
+            raise TypeError("names must be a sequence of strings")
+        object.__setattr__(self, "names", tuple(self.names))
 
 
 @dataclass(frozen=True)
@@ -448,6 +470,7 @@ class CommandInfo:
     pid: int
     command: str
     running: bool
+    command_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -461,6 +484,22 @@ class SandboxInfo:
     image: str | None
     xpu: str | None = None
     storage_mb: int | None = None
+    metadata: Mapping[str, str] = field(default_factory=dict)
+    expires_at_unix_seconds: int | None = None
+
+    @property
+    def sandbox_id(self) -> str:
+        """E2B-style identity alias; ``id`` remains supported."""
+        return self.id
+
+    @property
+    def end_at(self) -> datetime | None:
+        """Running lifetime deadline in UTC; None means no active deadline."""
+        return (
+            datetime.fromtimestamp(self.expires_at_unix_seconds, timezone.utc)
+            if self.expires_at_unix_seconds is not None
+            else None
+        )
 
 
 @dataclass(frozen=True)
