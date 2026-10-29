@@ -7,7 +7,7 @@ import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from ._image_plan import ImageMountPlan
 from .types import Mount
@@ -16,17 +16,43 @@ if TYPE_CHECKING:
     from .sandbox import Sandbox
 
 
+_PREPARE_RUNTIME = r"""set -eu
+for tool in docker dockerd containerd ctr; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "Docker runtime image is missing $tool" >&2
+        exit 127
+    }
+done
+ready=true
+for tool in bash python3 findmnt mount tar xz realpath usermod; do
+    command -v "$tool" >/dev/null 2>&1 || ready=false
+done
+if [ "$ready" = false ]; then
+    if ! command -v apk >/dev/null 2>&1; then
+        printf '%s\n' 'Missing Docker support tools; install bash, python3,' \
+            'util-linux, coreutils, shadow, tar and xz in the runtime image.' >&2
+        exit 127
+    fi
+    apk add --no-cache bash python3 coreutils util-linux shadow tar xz
+fi
+docker compose version >/dev/null
+"""
+
+
 @dataclass(frozen=True)
 class DockerRuntime:
     """Prepare a private Docker daemon inside a fresh sandbox.
 
     Pass sandbox_options() to both fresh creation and from_snapshot(). Call
     start() only on fresh creation: snapshot restore retains the actual daemon,
-    containers, sockets and bridge processes. The outer image must provide
-    dockerd, containerd, ctr, Python 3, findmnt and mount. The matching helper is
+    containers, sockets and bridge processes. The public default_image provides
+    Docker, containerd and Compose; fresh startup installs missing Alpine support
+    packages. Custom images must provide these tools. The matching helper is
     source-built from builder/image-bridge, or preinstalled by the operator at
     /opt/akernel-image-bridge. No code is downloaded at runtime.
     """
+
+    default_image: ClassVar[str] = "docker.io/library/docker:28.3.3-dind"
 
     images: ImageMountPlan | None = None
     bridge_binary: Path | None = None
@@ -144,6 +170,9 @@ class DockerRuntime:
         if network not in {"host", "bridge"}:
             raise ValueError("Docker network must be host or bridge")
         sandbox.commands.run("test ! -S /var/run/docker.sock", timeout=20, check=True)
+        sandbox.commands.run(
+            shlex.join(["sh", "-c", _PREPARE_RUNTIME]), timeout=300, check=True
+        )
         flags = self._bridge(sandbox)
         if network == "host":
             flags += ["--iptables=false", "--ip6tables=false", "--bridge=none"]

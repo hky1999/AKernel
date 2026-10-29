@@ -2,7 +2,7 @@
 
 Requires an owned endpoint with the managed Compose runtime prerequisites.
 Example: python sdk/python/examples/compose_checkpoint.py ./project \
-    --file ./project/compose.yaml --image <dind-image> \
+    --file ./project/compose.yaml \
     --bridge /absolute/path/akernel-image-bridge --service worker \
     --command 'exec python3 worker.py'
 """
@@ -18,7 +18,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--file", action="append", required=True, type=Path)
-    parser.add_argument("--image", required=True)
+    parser.add_argument("--image", default=DockerRuntime.default_image)
     parser.add_argument("--bridge", required=True, type=Path)
     parser.add_argument("--service", required=True)
     parser.add_argument("--command", required=True)
