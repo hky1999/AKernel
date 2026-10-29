@@ -15,6 +15,14 @@
 """Public API for the AKernel Python SDK."""
 
 import importlib
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ._compose import ComposeOperationError, ComposeProject, ServiceHandle
+    from ._docker_runtime import DockerRuntime
+    from ._image_plan import ImageMountPlan
+    from ._image_resolver import prepare_compose_images
+    from ._service_process import ServiceProcessHandle
 
 from ._backends.errors import (
     AuthenticationException,
