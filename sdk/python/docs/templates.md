@@ -124,6 +124,78 @@ leaves the sandbox running until explicit `ak delete`, idle policy or platform
 lifecycle action. Use the existing global TLS flags as needed. There is no
 `ak template build`/alias management/E2B HTTP compatibility layer in this MVP.
 
+## Shared storage and cross-node startup
+
+Template registration preserves the snapshot's storage location. New reusable
+snapshots are published through the source node's configured checkpoint store;
+`import_snapshot()` neither uploads nor migrates an existing local artifact.
+Use a source node configured with a shared store when publishing a template
+intended for cross-node startup. Existing local snapshots require a new shared
+capture or a separate controlled migration; register a new immutable template ID.
+
+ADX implements `s3` and `distributed_fs`. AKernel's maintained Helm shared-storage
+profile currently exposes `distributed_fs`; see the deployment-owned
+[JuiceFS/AFS guide](../../../deploy/shared-storage/README.md). Configure execution
+nodes and Coordinator's reclaimer with the same alias and actual storage
+namespace. This backend checks real JuiceFS/AFS mount identity; a local directory
+or an arbitrary RWX mount is not automatically accepted. Redis catalog data and
+checkpoint data need independent persistent storage and recovery procedures.
+
+Shared startup still requires compatible runtime/architecture and captured
+resource geometry, access to the base image, and the matching storage alias on
+the target node. By default shared restores may prefer the source node. Pass
+`node_id=target_node` and inspect the committed placement to prove a cross-node
+test. A successful create alone does not prove a second physical host was used.
+
+The opt-in staged acceptance driver is
+[`test_templates_shared.py`](../tests/integration/test_templates_shared.py).
+It saves memory/PID/FD and file witnesses in a private receipt, restores two
+independent children on a second host, and can verify that the same registration
+survives source loss and deployment-owned restarts from a fresh client:
+
+```sh
+export AKERNEL_RUN_INTEGRATION=1
+export AKERNEL_TEST_IMAGE=<python3-image>
+export AKERNEL_TEST_TEMPLATE_SOURCE_NODE=<source-node-id>
+export AKERNEL_TEST_TEMPLATE_TARGET_NODE=<target-node-id>
+export AKERNEL_TEST_TEMPLATE_STORAGE_ALIAS=<shared-alias>
+export AKERNEL_TEST_TEMPLATE_RECEIPT=/absolute/private/path/template-receipt.json
+export AKERNEL_TEST_TEMPLATE_INSPECT_COMMAND='["/absolute/path/read-only-inspector"]'
+
+python sdk/python/tests/integration/test_templates_shared.py --capture-receipt
+python sdk/python/tests/integration/test_templates_shared.py \
+  SharedTemplateIntegrationTest.test_cross_node_state_and_independent_writes -v
+
+# With deployment-owned tools, retire only the dedicated source execution node.
+# Recreate target-local runtime/cache, catalog Redis, storage processes and the
+# control/API processes while retaining their intended persistent data volumes.
+# Reconnect using the same service identity from a fresh client process.
+export AKERNEL_TEST_TEMPLATE_SOURCE_OFFLINE=1
+export AKERNEL_TEST_TEMPLATE_MIN_AGE_SECONDS=1800
+python sdk/python/tests/integration/test_templates_shared.py \
+  SharedTemplateIntegrationTest.test_retained_template_after_source_loss_and_restarts -v
+```
+
+The read-only inspector receives `environment|snapshot|node` and an ID as argv.
+Environment results include committed `node_id` plus deployment-mapped
+`physical_host`; snapshot results include `storage` and `source_node_id`; node
+results include deployment-observed `online`. ADX's `adx-inspect` can provide the
+committed metadata; the deployment supplies actual host mapping and current
+node presence. Do not infer physical placement or online state from a stale
+catalog record. The driver never shuts down hosts or mutates the deployment.
+
+Keep an independent fault/UID/volume receipt for each restarted process. Report
+the actual retention interval and whether a real host or only its isolated ADX
+Pod was stopped. A bounded persistence/restart run does not establish multi-day
+reliability, storage HA or cold-disk performance. Local FUSE/cache recreation
+does not clear a shared host's global page cache.
+
+The capture intentionally retains its template and snapshot between phases,
+including on failure. After all consumers finish, explicitly delete the source
+by its recorded ID, unregister the recorded template, and delete its snapshot.
+Keep the receipt if cleanup is uncertain. Remove only test-owned deployment
+resources and data; never retire an existing Harbor node to run this test.
+
 ## Validation
 
 Unit coverage exercises public API compatibility, explicit template wire fields,
