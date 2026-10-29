@@ -155,10 +155,10 @@ survives source loss and deployment-owned restarts from a fresh client:
 
 ```sh
 export AKERNEL_RUN_INTEGRATION=1
-export AKERNEL_TEST_IMAGE=<python3-image>
-export AKERNEL_TEST_TEMPLATE_SOURCE_NODE=<source-node-id>
-export AKERNEL_TEST_TEMPLATE_TARGET_NODE=<target-node-id>
-export AKERNEL_TEST_TEMPLATE_STORAGE_ALIAS=<shared-alias>
+export AKERNEL_TEST_IMAGE='<python3-image>'
+export AKERNEL_TEST_TEMPLATE_SOURCE_NODE='<source-node-id>'
+export AKERNEL_TEST_TEMPLATE_TARGET_NODE='<target-node-id>'
+export AKERNEL_TEST_TEMPLATE_STORAGE_ALIAS='<shared-alias>'
 export AKERNEL_TEST_TEMPLATE_RECEIPT=/absolute/private/path/template-receipt.json
 export AKERNEL_TEST_TEMPLATE_INSPECT_COMMAND='["/absolute/path/read-only-inspector"]'
 
@@ -183,6 +183,9 @@ results include deployment-observed `online`. ADX's `adx-inspect` can provide th
 committed metadata; the deployment supplies actual host mapping and current
 node presence. Do not infer physical placement or online state from a stale
 catalog record. The driver never shuts down hosts or mutates the deployment.
+For a Kubernetes fixture, check node Pod/IP capacity and let the scheduler place
+control/storage Pods using selectors or affinity. Binding every fixture Pod with
+`nodeName` can bypass scheduling checks and cause replacement failures.
 
 Keep an independent fault/UID/volume receipt for each restarted process. Report
 the actual retention interval and whether a real host or only its isolated ADX
@@ -195,6 +198,14 @@ including on failure. After all consumers finish, explicitly delete the source
 by its recorded ID, unregister the recorded template, and delete its snapshot.
 Keep the receipt if cleanup is uncertain. Remove only test-owned deployment
 resources and data; never retire an existing Harbor node to run this test.
+
+After consumer cleanup, the recorded IDs can be released with:
+
+```python
+Sandbox.kill_by_id(receipt["source_id"])
+Template.delete(receipt["template_id"])
+Sandbox.delete_snapshot(receipt["snapshot_id"])
+```
 
 ## Validation
 
