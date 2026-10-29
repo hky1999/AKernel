@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ import httpx
 from akernel_sdk import DockerRuntime, ImageMountPlan, Sandbox
 from akernel_sdk import _image_resolver as resolver
 from akernel_sdk import sandbox as public
+from akernel_sdk._docker_runtime import _PREPARE_RUNTIME
 
 
 def digest(data):
@@ -101,6 +103,81 @@ class DockerRuntimeTest(unittest.TestCase):
         self.assertEqual(sandbox.commands.run.call_count, 1)
         self.assertTrue(sandbox.commands.run.call_args.kwargs["check"])
         sandbox.files.copy_from_local.assert_not_called()
+
+    def test_public_runtime_bootstrap_installs_missing_tools_before_bridge(self):
+        sandbox = MagicMock()
+        runtime = DockerRuntime()
+        with patch.object(DockerRuntime, "_bridge", return_value=[]) as bridge:
+            # Refusing an existing daemon is the first operation. A failed package
+            # preparation on a fresh sandbox must not start any image services.
+            sandbox.commands.run.side_effect = [
+                SimpleNamespace(),
+                RuntimeError("bootstrap failed"),
+            ]
+            with self.assertRaisesRegex(RuntimeError, "bootstrap failed"):
+                runtime.start(sandbox)
+            bridge.assert_not_called()
+        self.assertIn("apk add --no-cache", sandbox.commands.run.call_args.args[0])
+        self.assertTrue(sandbox.commands.run.call_args.kwargs["check"])
+
+    def test_bootstrap_reuses_ready_images_and_handles_public_alpine(self):
+        binaries = self.directory / "bin"
+        binaries.mkdir()
+        record = self.directory / "packages"
+
+        def executable(name, body="exit 0"):
+            path = binaries / name
+            path.write_text("#!/bin/sh\n" + body + "\n")
+            path.chmod(0o755)
+
+        for name in ("docker", "dockerd", "containerd", "ctr"):
+            executable(name)
+        executable("apk", 'printf "%s\\n" "$*" > "$RECORD"')
+        environment = {"PATH": str(binaries), "RECORD": str(record)}
+        result = subprocess.run(
+            ["/bin/sh", "-c", _PREPARE_RUNTIME],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            record.read_text().strip(),
+            "add --no-cache bash python3 coreutils util-linux shadow tar xz",
+        )
+        record.unlink()
+        for name in (
+            "bash",
+            "python3",
+            "findmnt",
+            "mount",
+            "tar",
+            "xz",
+            "realpath",
+            "usermod",
+        ):
+            executable(name)
+        result = subprocess.run(
+            ["/bin/sh", "-c", _PREPARE_RUNTIME],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(record.exists())
+        (binaries / "dockerd").unlink()
+        result = subprocess.run(
+            ["/bin/sh", "-c", _PREPARE_RUNTIME],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 127)
+        self.assertIn("missing dockerd", result.stderr)
+        self.assertFalse(record.exists())
 
     def test_bridge_upload_is_sdk_owned_and_precedes_dockerd(self):
         sandbox = MagicMock()

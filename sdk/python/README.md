@@ -1407,7 +1407,7 @@ runtime = DockerRuntime(
     writable_mb=2048, writable_backing="file",
 )
 sandbox = Sandbox(
-    image="<compatible-dind-runtime-image>", cpu=4000, memory=8192,
+    image=DockerRuntime.default_image, cpu=4000, memory=8192,
     storage_mb=30720, cwd="/", failover=False,
     **runtime.sandbox_options(),
 )
@@ -1436,6 +1436,14 @@ The SDK prepares manifest/config metadata only. Sandboxd's existing OCI/ROFS ima
 
 `from_snapshot(..., extra_config=...)` and `create(snapshot_id=..., extra_config=...)` forward validated, defensively copied runtime configuration. Supply the same managed-upper geometry and image mounts on restore. Native ADX DTOs, client connection/TLS handling and reconstructed commands/files/tunnel handles stay inside the SDK. Snapshot restore does not capture local Python harness state or external services; callers own alignment, fencing the previous execution and deleting snapshots.
 
+`DockerRuntime.default_image` is the public Docker Hub image
+`docker.io/library/docker:28.3.3-dind`. Fresh runtime startup installs missing
+Alpine support packages (Python 3, Bash, util-linux and related tools). This
+requires access to Docker Hub and Alpine package repositories; no custom runtime
+image build or registry push is needed. A compatible prebuilt image can still be
+selected explicitly to avoid installing packages during startup. Restore never
+repeats runtime installation or starts another Docker daemon.
+
 ### Compose projects and service processes (source preview)
 
 `ComposeProject`, `ServiceHandle` and `ServiceProcessHandle` are provided by this source revision. They use the same managed Docker runtime and existing ROFS provider described above. Their backend-neutral operations use the existing Agent DX API. The managed file-backed upper profile additionally requires compatible Sandboxd support; installing this Python SDK alone does not enable it. The framework/runtime boundary and integration order are described in [managed Compose integration](docs/managed-compose.md). A complete client-side example is in [compose_checkpoint.py](examples/compose_checkpoint.py).
@@ -1452,7 +1460,7 @@ project = ComposeProject.prepare(
                           writable_mb=2048, writable_backing="file"),
     auto_images=True, output_dir="./artifacts/compose",
 )
-sandbox = Sandbox(image="<compatible-dind-runtime-image>", cpu=4000,
+sandbox = Sandbox(image=DockerRuntime.default_image, cpu=4000,
                   memory=8192, storage_mb=30720, cwd="/", failover=False,
                   **project.sandbox_options())
 try:
