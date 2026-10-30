@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/compose-spec/compose-go/v2/types"
@@ -38,6 +39,33 @@ func TestRejectsForeignBuildPlatform(t *testing.T) {
 	_, err := dockerfileImages("FROM --platform=linux/arm64 ubuntu:24.04\n", &types.BuildConfig{})
 	if err == nil {
 		t.Fatal("foreign-platform mounts must be rejected before sandbox creation")
+	}
+}
+
+func TestComposeMixedBuildAndDigestServiceDiscovery(t *testing.T) {
+	dir := t.TempDir()
+	image := "harborframework/terminal-bench:loadgen@sha256:" + strings.Repeat("a", 64)
+	files := map[string]string{
+		"Dockerfile":   "FROM ubuntu:24.04\n",
+		"compose.yaml": "services:\n  main:\n    build: .\n  loadgen:\n    image: " + image + "\n",
+	}
+	for name, source := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(source), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input, _ := json.Marshal(map[string]any{"directory": dir, "files": []string{filepath.Join(dir, "compose.yaml")}})
+	var output bytes.Buffer
+	if err := discover(bytes.NewReader(input), &output); err != nil {
+		t.Fatal(err)
+	}
+	var result struct{ References []string }
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"docker.io/" + image, "docker.io/library/ubuntu:24.04"}
+	if !reflect.DeepEqual(result.References, want) {
+		t.Fatalf("got %v, want %v", result.References, want)
 	}
 }
 
