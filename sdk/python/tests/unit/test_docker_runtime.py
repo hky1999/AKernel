@@ -30,16 +30,48 @@ class DockerRuntimeTest(unittest.TestCase):
 
     def plan(self):
         blobs = []
-        for kind in ("config", "manifest"):
-            payload = json.dumps({"kind": kind}).encode()
+
+        def metadata(kind, value, media_type):
+            payload = json.dumps(value).encode()
             name = kind + ".json"
             (self.directory / name).write_bytes(payload)
             blobs.append(
                 {
                     "file": name,
-                    "descriptor": {"digest": digest(payload), "size": len(payload)},
+                    "descriptor": {
+                        "digest": digest(payload),
+                        "size": len(payload),
+                        "mediaType": media_type,
+                    },
                 }
             )
+            return blobs[-1]["descriptor"]
+
+        config = metadata(
+            "config",
+            {
+                "architecture": "amd64",
+                "os": "linux",
+                "rootfs": {"type": "layers", "diff_ids": ["sha256:" + "a" * 64]},
+            },
+            "application/vnd.oci.image.config.v1+json",
+        )
+        metadata(
+            "manifest",
+            {
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": config,
+                "layers": [
+                    {
+                        "digest": "sha256:" + "b" * 64,
+                        "size": 123,
+                        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                    }
+                ],
+            },
+            "application/vnd.oci.image.manifest.v1+json",
+        )
         target = blobs[1]["descriptor"]
         reference = "registry.example/test@" + target["digest"]
         image = {
@@ -55,6 +87,37 @@ class DockerRuntimeTest(unittest.TestCase):
             json.dumps({"images": [image], "services": {"main": reference}})
         )
         return path
+
+    def test_old_helper_is_rejected_before_project_data_is_dispatched(self):
+        response = SimpleNamespace(returncode=0, stdout='{"references":[]}', stderr="")
+        with patch.object(resolver.subprocess, "run", return_value=response) as run:
+            with self.assertRaisesRegex(ValueError, "schema 2"):
+                resolver.prepare_compose_images(
+                    self.directory,
+                    [],
+                    output_dir=self.directory / "output",
+                    bridge_binary=self.directory / "bridge",
+                )
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][-1], "capabilities")
+        self.assertNotIn("input", run.call_args.kwargs)
+
+    def test_discovery_does_not_implicitly_inherit_client_credentials(self):
+        response = SimpleNamespace(
+            returncode=0, stdout='{"references":[],"discover_schema":2}', stderr=""
+        )
+        with (
+            patch.dict("os.environ", {"AKERNEL_TOKEN": "host-only-fixture"}),
+            patch.object(resolver.subprocess, "run", return_value=response) as run,
+        ):
+            plan = resolver.prepare_compose_images(
+                self.directory,
+                [],
+                output_dir=self.directory / "output",
+                bridge_binary=self.directory / "bridge",
+            )
+        self.assertTrue(plan.automatic)
+        self.assertTrue(all(call.kwargs["env"] == {} for call in run.call_args_list))
 
     def test_integrity_and_path_escape_rejected_before_sandbox_creation(self):
         for defect in ("corrupt", "escape", "root"):
