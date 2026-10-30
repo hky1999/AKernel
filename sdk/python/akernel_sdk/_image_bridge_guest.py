@@ -15,8 +15,11 @@ def verify_image_bridge(plan):
     """
     data = json.loads(plan.read_text())
     references = {}
+    roots_by_chain: dict[str, set[str]] = {}
     for image in data["images"]:
         references[image["reference"]] = image["target"]["digest"]
+        roots_by_chain.setdefault(image["chain_id"], set()).add(image["root"])
+    for chain, roots in roots_by_chain.items():
         result = subprocess.run(
             [
                 "ctr",
@@ -28,7 +31,7 @@ def verify_image_bridge(plan):
                 "--snapshotter",
                 "akernel",
                 "info",
-                image["chain_id"],
+                chain,
             ],
             check=True,
             capture_output=True,
@@ -41,7 +44,7 @@ def verify_image_bridge(plan):
             or info.get("Labels", {}).get(
                 "containerd.io/snapshot/agent-service.image-root"
             )
-            != image["root"]
+            not in roots
         ):
             raise RuntimeError("Prepared image snapshot does not match its ROFS mount")
     for alias, reference in data.get("aliases", {}).items():
