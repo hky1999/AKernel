@@ -141,6 +141,46 @@ class ComposeTest(unittest.TestCase):
             )
         )
 
+    def test_missing_exit_status_is_an_unknown_operation_outcome(self):
+        failure = ComposeOperationError(
+            "build", CommandResult(stdout="partial", stderr="", exit_code=None)
+        )
+        self.assertEqual(failure.outcome, "unknown")
+
+    def test_zero_timeout_image_verification_waits_without_foreground_timeout(self):
+        project = self.prepare()
+        descriptor = project.descriptor
+        descriptor["automatic_images"] = True
+        project = ComposeProject.attach(self.sandbox, descriptor)
+        handle = self.sandbox.commands.run.return_value = MagicMock(
+            command_id="verify-id"
+        )
+        handle.wait.side_effect = [
+            CommandResult(stdout="", stderr="", exit_code=None),
+            CommandResult(stdout="verified", stderr="", exit_code=0),
+        ]
+        project.pull(timeout=0)
+        self.assertIs(self.sandbox.commands.run.call_args.kwargs["background"], True)
+        handle.kill.assert_not_called()
+
+    def test_failed_cancel_keeps_original_timeout_and_command_identity(self):
+        from threading import Event
+
+        from akernel_sdk import TimeoutException
+
+        project = ComposeProject.attach(self.sandbox, self.prepare().descriptor)
+        handle = self.sandbox.commands.run.return_value = MagicMock(
+            command_id="owned-command"
+        )
+        cleanup = RuntimeError("kill response lost")
+        handle.kill.side_effect = cleanup
+        cancellation = Event()
+        cancellation.set()
+        with self.assertRaises(TimeoutException) as raised:
+            project.run(["ps"], timeout=0, cancellation=cancellation)
+        self.assertEqual(raised.exception.command_id, "owned-command")
+        self.assertEqual(raised.exception.cleanup_errors, (cleanup,))
+
     def test_failed_up_retains_output_and_collects_logs_without_restarting(self):
         project = self.prepare()
         with patch.object(DockerRuntime, "start"):

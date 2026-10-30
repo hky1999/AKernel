@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ._image_plan import ImageMountPlan, _digest
+from ._image_plan import ImageMountPlan, _chain_id, _digest
 
 ACCEPT = (
     "application/vnd.oci.image.index.v1+json, "
@@ -156,9 +156,7 @@ class RegistryMetadata:
         diffs = [_digest(d) for d in config["rootfs"]["diff_ids"]]
         if not diffs:
             raise ValueError("An external image with an empty rootfs cannot be mounted")
-        chain = diffs[0]
-        for diff in diffs[1:]:
-            chain = "sha256:" + hashlib.sha256(f"{chain} {diff}".encode()).hexdigest()
+        chain = _chain_id(diffs)
         return {
             "reference": repository + "@" + target["digest"],
             "root": "/opt/akernel-images/" + target["digest"][7:],
@@ -190,10 +188,33 @@ def prepare_compose_images(
         "directory": str(Path(directory).resolve()),
         "files": [str(Path(p).resolve()) for p in files],
     }
+    binary = str(Path(bridge_binary).resolve())
+    # Probe without project data before invoking a possibly older helper. The
+    # schema version requires client-file containment before reading Dockerfiles.
+    capability = subprocess.run(
+        [binary, "--mode", "capabilities"],
+        env=dict(env or {}),
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    try:
+        supported = (
+            capability.returncode == 0
+            and json.loads(capability.stdout).get("discover_schema") == 2
+        )
+    except (ValueError, AttributeError):
+        supported = False
+    if not supported:
+        raise ValueError(
+            "Image bridge helper must support discovery schema 2; "
+            "install the helper matching this SDK"
+        )
     result = subprocess.run(
-        [str(Path(bridge_binary).resolve()), "--mode", "discover"],
+        [binary, "--mode", "discover"],
         input=json.dumps(request),
-        env=env,
+        env=dict(env or {}),
         text=True,
         capture_output=True,
         timeout=60,
@@ -213,7 +234,12 @@ def prepare_compose_images(
     path = output / "plan.json"
     path.write_text(
         json.dumps(
-            {"images": list(images.values()), "services": {}, "aliases": aliases},
+            {
+                "images": list(images.values()),
+                "services": {},
+                "aliases": aliases,
+                "automatic": True,
+            },
             indent=2,
         )
     )

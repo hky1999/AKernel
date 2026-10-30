@@ -296,6 +296,13 @@ func main() {
 	socket := flag.String("socket", "/run/akernel-image-bridge/snapshotter.sock", "snapshotter socket")
 	address := flag.String("containerd", "/run/akernel-image-bridge/containerd.sock", "containerd socket")
 	flag.Parse()
+	if *mode == "capabilities" {
+		returnErr := json.NewEncoder(os.Stdout).Encode(map[string]any{"discover_schema": 2})
+		if returnErr != nil {
+			log.Fatal(returnErr)
+		}
+		return
+	}
 	if *mode == "discover" {
 		if err := discover(os.Stdin, os.Stdout); err != nil {
 			log.Fatal(err)

@@ -1452,6 +1452,13 @@ repeats runtime installation or starts another Docker daemon.
 
 In automatic image mode, both Dockerfile bases and image-only services use pinned ROFS mounts. `pull()` verifies their Docker references and committed snapshots; `up()` verifies them again and prevents native repeat pulls. This includes `image: name:tag@sha256:...`, for which native Compose's missing policy can still request layer extraction. Tags are resolved once during preparation; missing or changed registrations fail without fallback. Without automatic images, native Compose pull behavior is retained.
 
+This revision requires an image bridge reporting `discover_schema: 2` via
+`--mode capabilities`; replace older helpers before upgrading the SDK. Discovery
+confines build/Dockerfile and `.env` reads to the frozen context and receives
+only explicitly supplied project variables. `include` / `extends.file` and
+remote contexts are not supported in this source preview. Valid shared chains
+across different manifests/configs are supported after OCI configuration checks.
+
 ```python
 from pathlib import Path
 from akernel_sdk import ComposeProject, DockerRuntime, Sandbox, ServiceProcessHandle

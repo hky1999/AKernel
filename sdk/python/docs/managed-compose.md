@@ -25,11 +25,26 @@ This implementation is based on the reusable snapshot/lifecycle SDK already merg
 
 The SDK never updates node configuration or deployments. The snapshot/restore API has no client switch that can enable reflink on an unconfigured backend.
 
+Use a helper advertising `{"discover_schema":2}` through `--mode capabilities`.
+The SDK checks this before dispatching project data; the earlier `72e706e2`
+binary is insufficient for this revision. Discovery keeps Dockerfile/build
+context and project `.env` reads inside the frozen project and receives only
+explicit project variables. `include` and `extends.file` are not supported by
+this preview. Pass explicit supported Compose overlays; do not assume complete
+Compose syntax compatibility. Original kv-live-surgery definitions need no edit.
+
 ## Fresh creation and recovery
 
 `ComposeProject.prepare()` creates a frozen local context and resolves image inputs before sandbox creation. Pass `project.sandbox_options()` into creation, then call `start_runtime()`, `build()`, `pull()` and `up()` at explicit boundaries. A partial startup is not replayable on that project object; the owner must clean up its newly created sandbox.
 
 With `auto_images=True`, image-only services (including `image: name:tag@sha256:...`) use the same prepared ROFS roots as Dockerfile bases. `pull()` verifies each pinned Docker reference and committed bridge snapshot instead of issuing a second native pull. `up()` repeats that verification and disables native pulls; builds remain enabled. Tags are resolved once during preparation. Missing snapshots or changed references fail visibly without downloading/extracting a replacement into the private upper. Ordinary Compose without automatic images retains native pull behavior. Original project files and image declarations are unchanged.
+
+Plans validate the selected linux/amd64 manifest/config and derive its chain ID
+from the rootfs diff IDs. Different config or index/manifest digests may share
+the same chain. Scratch-only automatic builds carry an explicit empty-plan
+marker; unused aliases from a manually selected service plan are not registered.
+An absent command exit status remains an unknown outcome. A timeout/cancel
+retains command identity and secondary kill errors, without replaying execution.
 
 For checkpointing, quiesce tools/model requests, stop the real process tree using `ServiceProcessHandle`, and call `sandbox.create_snapshot()`. Persist the snapshot ID together with the project descriptor, process descriptor and application state. Resume the source tree if the source continues.
 

@@ -27,19 +27,76 @@ def _digest(value: Any) -> str:
     return value
 
 
+def _chain_id(diffs: list[str]) -> str:
+    if not diffs:
+        raise ValueError("Mounted external images require a nonempty rootfs")
+    chain = _digest(diffs[0])
+    for diff in diffs[1:]:
+        chain = (
+            "sha256:" + hashlib.sha256(f"{chain} {_digest(diff)}".encode()).hexdigest()
+        )
+    return chain
+
+
+def _validate_image_config(image: dict[str, Any], payloads: dict[str, Any]) -> None:
+    """Bind the mounted chain to the selected immutable OCI configuration."""
+    try:
+        manifest = payloads[image["target"]["digest"]]
+        for _ in range(4):
+            if "manifests" not in manifest:
+                break
+            matches = [
+                d
+                for d in manifest["manifests"]
+                if d.get("platform", {}).get("os") == "linux"
+                and d.get("platform", {}).get("architecture") == "amd64"
+            ]
+            if len(matches) != 1:
+                raise ValueError("Image plan requires one linux/amd64 manifest")
+            manifest = payloads[_digest(matches[0]["digest"])]
+        expected = manifest["config"]
+        if any(
+            expected[k] != image["config"][k] for k in ("digest", "size", "mediaType")
+        ):
+            raise ValueError("Image config is not selected by its target manifest")
+        config = payloads[_digest(expected["digest"])]
+        if config.get("os") != "linux" or config.get("architecture") != "amd64":
+            raise ValueError("Image config must match linux/amd64")
+        rootfs = config["rootfs"]
+        diffs = rootfs["diff_ids"]
+        if (
+            rootfs.get("type") != "layers"
+            or not isinstance(diffs, list)
+            or len(diffs) != len(manifest["layers"])
+        ):
+            raise ValueError("Image rootfs and manifest layer list disagree")
+        if _chain_id(diffs) != image["chain_id"]:
+            raise ValueError("Image chain ID does not match its rootfs configuration")
+    except (KeyError, TypeError) as error:
+        raise ValueError(
+            "Image plan has incomplete OCI manifest/config metadata"
+        ) from error
+
+
 @dataclass(frozen=True)
 class ImageMountPlan:
     directory: Path
     images: list[dict[str, Any]]
     services: dict[str, str]
     aliases: dict[str, str] = field(default_factory=dict)
+    automatic: bool = False
 
     @classmethod
     def load(cls, path: str | Path, *, bases_only: bool = False) -> ImageMountPlan:
         path = Path(path).resolve()
         data = json.loads(path.read_text())
         images, services = data.get("images"), data.get("services")
-        if not isinstance(images, list) or (not images and not bases_only):
+        automatic = data.get("automatic", False)
+        if not isinstance(automatic, bool):
+            raise ValueError("Image plan automatic marker must be a boolean")
+        if not isinstance(images, list) or (
+            not images and not (bases_only and automatic)
+        ):
             raise ValueError("Image plan requires a nonempty images list")
         if not isinstance(services, dict) or (
             "main" not in services and not bases_only
@@ -58,6 +115,7 @@ class ImageMountPlan:
             _digest(image["chain_id"])
             by_reference[reference] = image
             descriptors = set()
+            payloads = {}
             for blob in image["blobs"]:
                 name = blob["file"]
                 if not isinstance(name, str) or Path(name).name != name:
@@ -74,8 +132,10 @@ class ImageMountPlan:
                 ):
                     raise ValueError("Image metadata digest or size mismatch")
                 descriptors.add(actual)
+                payloads[actual] = json.loads(payload)
             if not {digest, _digest(image["config"]["digest"])} <= descriptors:
                 raise ValueError("Image plan is missing its manifest or config")
+            _validate_image_config(image, payloads)
         for service, reference in services.items():
             if (
                 not isinstance(service, str)
@@ -95,7 +155,15 @@ class ImageMountPlan:
             list(by_reference) if bases_only else list(dict.fromkeys(services.values()))
         )
         return cls(
-            path.parent, [by_reference[r] for r in selected], dict(services), aliases
+            path.parent,
+            [by_reference[r] for r in selected],
+            dict(services),
+            {
+                alias: reference
+                for alias, reference in aliases.items()
+                if reference in selected
+            },
+            automatic,
         )
 
     def mounts(self, factory: Callable[..., Any]) -> list[Any]:

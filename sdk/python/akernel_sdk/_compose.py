@@ -42,7 +42,7 @@ class ComposeOperationError(BackendOperationError):
         super().__init__(
             f"Compose {phase} failed (exit_code={result.exit_code})",
             code="COMPOSE_FAILED",
-            outcome="terminal",
+            outcome="unknown" if result.exit_code is None else "terminal",
         )
         self.phase = phase
         self.result = result
@@ -349,31 +349,43 @@ class ComposeProject:
         check: bool = False,
         cancellation: Event | None = None,
     ) -> CommandResult:
+        result = self._execute(
+            self.command(args), timeout=timeout, cancellation=cancellation
+        )
+        if check and result.exit_code != 0:
+            raise ComposeOperationError(args[0], result)
+        return result
+
+    def _execute(
+        self, command: str, *, timeout: int, cancellation: Event | None = None
+    ) -> CommandResult:
         sandbox = self._require_sandbox()
         if cancellation is None and timeout != 0:
-            result = sandbox.commands.run(self.command(args), cwd="/", timeout=timeout)
+            result = sandbox.commands.run(command, cwd="/", timeout=timeout)
         else:
             # A zero execution budget means no deadline. Waits remain bounded
             # so an async caller can cancel without abandoning remote work.
-            handle = sandbox.commands.run(self.command(args), cwd="/", background=True)
+            handle = sandbox.commands.run(command, cwd="/", background=True)
             deadline = time.monotonic() + timeout if timeout > 0 else None
             while True:
                 cancelled = cancellation is not None and cancellation.is_set()
                 expired = deadline is not None and time.monotonic() >= deadline
                 if cancelled or expired:
-                    handle.kill()
-                    raise TimeoutException(
+                    failure = TimeoutException(
                         "Compose command cancelled"
                         if cancelled
                         else "Compose command timed out",
                         command_id=handle.command_id,
                         outcome="unknown",
                     )
+                    try:
+                        handle.kill()
+                    except BaseException as cleanup_error:
+                        retain_failure_context(failure, sandbox.id, cleanup_error)
+                    raise failure
                 result = handle.wait(timeout=1)
                 if result.exit_code is not None:
                     break
-        if check and result.exit_code != 0:
-            raise ComposeOperationError(args[0], result)
         return result
 
     def _operation(self, args: Sequence[str], timeout: int) -> CommandResult:
@@ -416,7 +428,7 @@ class ComposeProject:
             self._operation(["pull", "--ignore-buildable"], timeout)
 
     def _verify_images(self, phase: str, timeout: int) -> None:
-        result = self._require_sandbox().commands.run(
+        result = self._execute(
             "python3 /opt/akernel-docker-runtime/start.py --verify "
             "--plan /opt/akernel-docker-runtime/metadata/plan.json",
             timeout=timeout,

@@ -106,6 +106,7 @@ class DockerRuntime:
                     "images": plan.images,
                     "services": plan.services,
                     "aliases": plan.aliases,
+                    "automatic": plan.automatic,
                 }
             ),
         )

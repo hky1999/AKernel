@@ -19,7 +19,56 @@ import (
 	"github.com/moby/buildkit/frontend/dockerfile/instructions"
 	"github.com/moby/buildkit/frontend/dockerfile/parser"
 	"github.com/moby/buildkit/frontend/dockerfile/shell"
+	"gopkg.in/yaml.v3"
 )
+
+func projectPath(root, path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve managed project input: %w", err)
+	}
+	relative, err := filepath.Rel(root, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("managed Compose inputs must stay within the project directory")
+	}
+	return resolved, nil
+}
+
+func validateComposeSources(root string, files []string) error {
+	// Only explicitly supplied top-level files may live outside the frozen
+	// context (SDK overlays do). Never let user YAML load other client files.
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return err
+		}
+		var document map[string]any
+		if err = yaml.Unmarshal(data, &document); err != nil {
+			return err
+		}
+		if document["include"] != nil {
+			return fmt.Errorf("managed Compose discovery does not support include; supply explicit project files")
+		}
+		services, _ := document["services"].(map[string]any)
+		for _, value := range services {
+			service, _ := value.(map[string]any)
+			extends, _ := service["extends"].(map[string]any)
+			if extends["file"] != nil {
+				return fmt.Errorf("managed Compose discovery does not support extends.file; supply explicit project files")
+			}
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".env")); err == nil {
+		_, err = projectPath(root, ".env")
+		return err
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
 
 func dockerfileImages(source string, build *types.BuildConfig) ([]string, error) {
 	parsed, err := parser.Parse(strings.NewReader(source))
@@ -136,6 +185,17 @@ func discover(input io.Reader, output io.Writer) error {
 	if err := json.NewDecoder(input).Decode(&request); err != nil {
 		return err
 	}
+	root, err := filepath.Abs(request.Directory)
+	if err != nil {
+		return err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
+	if err = validateComposeSources(root, request.Files); err != nil {
+		return err
+	}
 	options, err := cli.NewProjectOptions(request.Files,
 		cli.WithWorkingDirectory(request.Directory), cli.WithName("harbor"),
 		cli.WithOsEnv, cli.WithEnvFiles(), cli.WithDotEnv,
@@ -162,6 +222,11 @@ func discover(input io.Reader, output io.Writer) error {
 			continue
 		}
 		build := service.Build
+		contextPath, err := projectPath(root, build.Context)
+		if err != nil {
+			return fmt.Errorf("service %s build context: %w", service.Name, err)
+		}
+		build.Context = contextPath
 		build.Args = build.Args.Resolve(func(key string) (string, bool) {
 			value, ok := project.Environment[key]
 			return value, ok
@@ -179,6 +244,10 @@ func discover(input io.Reader, output io.Writer) error {
 			}
 			if !filepath.IsAbs(name) {
 				name = filepath.Join(build.Context, name)
+			}
+			name, err = projectPath(root, name)
+			if err != nil {
+				return fmt.Errorf("service %s Dockerfile: %w", service.Name, err)
 			}
 			data, err := os.ReadFile(name)
 			if err != nil {

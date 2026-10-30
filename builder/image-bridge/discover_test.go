@@ -69,6 +69,58 @@ func TestComposeMixedBuildAndDigestServiceDiscovery(t *testing.T) {
 	}
 }
 
+func TestDiscoveryRejectsClientInputsOutsideFrozenProject(t *testing.T) {
+	for _, defect := range []string{"context", "dockerfile", "symlink", "dotenv", "include", "extends"} {
+		t.Run(defect, func(t *testing.T) {
+			parent := t.TempDir()
+			root := filepath.Join(parent, "project")
+			if err := os.Mkdir(root, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(parent, "Dockerfile"), []byte("FROM private.example/secret:client-only\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "Dockerfile"), []byte("FROM ubuntu:24.04\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			compose := "services: {main: {build: .}}\n"
+			switch defect {
+			case "context":
+				compose = "services: {main: {build: ..}}\n"
+			case "dockerfile":
+				compose = "services: {main: {build: {context: ., dockerfile: ../Dockerfile}}}\n"
+			case "symlink":
+				if err := os.Remove(filepath.Join(root, "Dockerfile")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(parent, "Dockerfile"), filepath.Join(root, "Dockerfile")); err != nil {
+					t.Fatal(err)
+				}
+			case "dotenv":
+				if err := os.Symlink(filepath.Join(parent, "Dockerfile"), filepath.Join(root, ".env")); err != nil {
+					t.Fatal(err)
+				}
+			case "include":
+				compose = "include: ../private.yaml\nservices: {main: {build: .}}\n"
+			case "extends":
+				compose = "services: {main: {extends: {file: ../private.yaml, service: x}, build: .}}\n"
+			}
+			file := filepath.Join(root, "compose.yaml")
+			if err := os.WriteFile(file, []byte(compose), 0600); err != nil {
+				t.Fatal(err)
+			}
+			input, _ := json.Marshal(map[string]any{"directory": root, "files": []string{file}})
+			var output bytes.Buffer
+			if err := discover(bytes.NewReader(input), &output); err == nil {
+				t.Fatal("outside/unsupported client input was accepted")
+			}
+			if strings.Contains(output.String(), "private.example") {
+				t.Fatal("private client input was disclosed")
+			}
+		})
+	}
+}
+
 func TestUnprovidedBuildArgumentRetainsDockerfileDefault(t *testing.T) {
 	images, err := dockerfileImages("ARG BASE=ubuntu:24.04\nFROM $BASE\n", &types.BuildConfig{Args: types.MappingWithEquals{"BASE": nil}})
 	if err != nil || !reflect.DeepEqual(images, []string{"docker.io/library/ubuntu:24.04"}) {
