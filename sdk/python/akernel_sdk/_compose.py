@@ -404,21 +404,35 @@ class ComposeProject:
             self._operation(["build", *(["--no-cache"] if no_cache else [])], timeout)
 
     def pull(self, *, timeout: int = 600) -> None:
-        if not self._descriptor["prebuilt_only"]:
-            self._operation(
-                [
-                    "pull",
-                    "--ignore-buildable",
-                    *(
-                        ["--policy", "missing"]
-                        if self._descriptor["automatic_images"]
-                        else []
-                    ),
-                ],
-                timeout,
+        """Prepare service images, verifying existing ROFS inputs in auto mode.
+
+        Automatic discovery already resolved and mounted all external inputs.
+        Native Compose pull can still unpack digest references despite its
+        missing policy, so use the checked mounted images rather than pull again.
+        """
+        if self._descriptor["automatic_images"]:
+            self._verify_images("pull", timeout)
+        elif not self._descriptor["prebuilt_only"]:
+            self._operation(["pull", "--ignore-buildable"], timeout)
+
+    def _verify_images(self, phase: str, timeout: int) -> None:
+        result = self._require_sandbox().commands.run(
+            "python3 /opt/akernel-docker-runtime/start.py --verify "
+            "--plan /opt/akernel-docker-runtime/metadata/plan.json",
+            timeout=timeout,
+        )
+        if self._output is not None:
+            (self._output / (phase + "-images.log")).write_text(
+                result.stdout + result.stderr
             )
+            if phase == "pull":
+                (self._output / "pull.log").write_text(result.stdout + result.stderr)
+        if result.exit_code != 0:
+            raise ComposeOperationError(phase, result)
 
     def up(self, *, wait_timeout: int = 600, timeout: int = 600) -> None:
+        if self._descriptor["automatic_images"]:
+            self._verify_images("up", timeout)
         self._operation(
             [
                 "up",
@@ -429,6 +443,8 @@ class ComposeProject:
                 *(
                     ["--no-build", "--pull", "never"]
                     if self._descriptor["prebuilt_only"]
+                    else ["--pull", "never"]
+                    if self._descriptor["automatic_images"]
                     else []
                 ),
             ],

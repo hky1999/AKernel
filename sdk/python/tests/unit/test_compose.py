@@ -86,6 +86,61 @@ class ComposeTest(unittest.TestCase):
         project.up()
         self.assertIn("up -d --wait", self.sandbox.commands.run.call_args.args[0])
 
+    def test_automatic_images_verify_pinned_inputs_and_never_pull_them_again(self):
+        binary = self.root / "bridge"
+        binary.write_bytes(b"fixture")
+        images = MagicMock()
+        images.mounts.return_value = []
+        original = (
+            "services:\n  api:\n    build: .\n  load:\n    image: "
+            "registry.example/load:release@sha256:" + "a" * 64 + "\n"
+        )
+        self.file.write_text(original)
+        with patch("akernel_sdk._compose.prepare_compose_images", return_value=images):
+            project = self.prepare(
+                auto_images=True, runtime=DockerRuntime(bridge_binary=binary)
+            )
+        attached = ComposeProject.attach(self.sandbox, project.descriptor)
+        attached.pull()
+        self.assertIn("start.py --verify", self.sandbox.commands.run.call_args.args[0])
+        self.sandbox.commands.run.reset_mock()
+        attached.build(no_cache=True)
+        attached.up()
+        commands = [c.args[0] for c in self.sandbox.commands.run.call_args_list]
+        self.assertIn("build --no-cache", commands[0])
+        self.assertIn("start.py --verify", commands[1])
+        self.assertIn("--pull never", commands[2])
+        self.assertNotIn("--no-build", commands[2])
+        self.assertFalse(any(" pull " in c for c in commands))
+        self.assertEqual(self.file.read_text(), original)
+        self.assertEqual((self.root / "prepared/source-0.yaml").read_text(), original)
+
+    def test_automatic_image_verification_failure_is_not_hidden_or_retried(self):
+        project = self.prepare()
+        descriptor = project.descriptor
+        descriptor["automatic_images"] = True
+        attached = ComposeProject.attach(self.sandbox, descriptor)
+        self.sandbox.commands.run.return_value = CommandResult(
+            stdout="", stderr="missing ROFS snapshot", exit_code=1
+        )
+        for phase in ("pull", "up"):
+            with self.subTest(phase=phase):
+                self.sandbox.commands.run.reset_mock()
+                with self.assertRaises(ComposeOperationError) as raised:
+                    getattr(attached, phase)()
+                self.assertEqual(raised.exception.phase, phase)
+                self.assertEqual(raised.exception.stderr, "missing ROFS snapshot")
+                self.assertEqual(self.sandbox.commands.run.call_count, 1)
+
+    def test_unmanaged_pull_keeps_native_compose_behavior(self):
+        project = ComposeProject.attach(self.sandbox, self.prepare().descriptor)
+        project.pull()
+        self.assertTrue(
+            self.sandbox.commands.run.call_args.args[0].endswith(
+                "pull --ignore-buildable"
+            )
+        )
+
     def test_failed_up_retains_output_and_collects_logs_without_restarting(self):
         project = self.prepare()
         with patch.object(DockerRuntime, "start"):

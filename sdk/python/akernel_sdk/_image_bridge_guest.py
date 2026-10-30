@@ -6,6 +6,66 @@ import time
 from pathlib import Path
 
 
+def verify_image_bridge(plan):
+    """Check pinned image records and mounted roots without pulling or unpacking.
+
+    Docker's digest pull path does not treat metadata-only registration as a
+    complete local content store. The committed snapshot is our filesystem
+    source; missing aliases or snapshots must fail instead of falling back.
+    """
+    data = json.loads(plan.read_text())
+    references = {}
+    for image in data["images"]:
+        references[image["reference"]] = image["target"]["digest"]
+        result = subprocess.run(
+            [
+                "ctr",
+                "--address",
+                "/run/akernel-image-bridge/containerd.sock",
+                "--namespace",
+                "moby",
+                "snapshots",
+                "--snapshotter",
+                "akernel",
+                "info",
+                image["chain_id"],
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        info = json.loads(result.stdout)
+        if (
+            info.get("Kind") != "Committed"
+            or info.get("Labels", {}).get(
+                "containerd.io/snapshot/agent-service.image-root"
+            )
+            != image["root"]
+        ):
+            raise RuntimeError("Prepared image snapshot does not match its ROFS mount")
+    for alias, reference in data.get("aliases", {}).items():
+        references[alias] = references[reference]
+    for reference, expected in references.items():
+        result = subprocess.run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{.Descriptor.Digest}}",
+                reference,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.stdout.strip() != expected:
+            raise RuntimeError("Prepared image reference changed: " + reference)
+    print("Verified pinned ROFS images; no layer pull or extraction required")
+
+
 def start_image_bridge(
     root, plan, children, writable_tmpfs_mb=0, writable_backing="memory"
 ):
@@ -151,17 +211,27 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument(
+        "--root", type=Path, default=Path("/opt/akernel-docker-runtime")
+    )
     parser.add_argument("--plan", type=Path, required=True)
-    parser.add_argument("--writable-tmpfs-mb", type=int, required=True)
+    parser.add_argument("--writable-tmpfs-mb", type=int, default=0)
+    parser.add_argument("--verify", action="store_true")
     parser.add_argument(
         "--writable-backing", choices=["memory", "file"], default="memory"
     )
     args = parser.parse_args()
-    print(
-        json.dumps(
-            start_image_bridge(
-                args.root, args.plan, [], args.writable_tmpfs_mb, args.writable_backing
+    if args.verify:
+        verify_image_bridge(args.plan)
+    else:
+        print(
+            json.dumps(
+                start_image_bridge(
+                    args.root,
+                    args.plan,
+                    [],
+                    args.writable_tmpfs_mb,
+                    args.writable_backing,
+                )
             )
         )
-    )
