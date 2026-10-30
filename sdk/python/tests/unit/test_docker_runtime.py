@@ -15,6 +15,7 @@ from akernel_sdk import DockerRuntime, ImageMountPlan, Sandbox
 from akernel_sdk import _image_resolver as resolver
 from akernel_sdk import sandbox as public
 from akernel_sdk._docker_runtime import _PREPARE_RUNTIME
+from akernel_sdk._image_bridge_guest import verify_image_bridge
 
 
 def digest(data):
@@ -253,3 +254,80 @@ class DockerRuntimeTest(unittest.TestCase):
         )
         self.assertEqual(len(image["blobs"]), 2)
         self.assertEqual(sum(r.url.host == "auth.example" for r in calls), 1)
+
+    def test_prepared_image_verification_checks_alias_digest_and_committed_root(self):
+        path = self.plan()
+        data = json.loads(path.read_text())
+        image = data["images"][0]
+        alias = "registry.example/test:tag@" + image["target"]["digest"]
+        data["aliases"] = {alias: image["reference"]}
+        path.write_text(json.dumps(data))
+        calls = []
+
+        def run(args, **kwargs):
+            calls.append(args)
+            self.assertTrue(kwargs["check"])
+            if args[0] == "ctr":
+                payload = json.dumps(
+                    {
+                        "Kind": "Committed",
+                        "Labels": {
+                            "containerd.io/snapshot/agent-service.image-root": image[
+                                "root"
+                            ]
+                        },
+                    }
+                )
+            else:
+                self.assertEqual(args[:3], ["docker", "image", "inspect"])
+                payload = image["target"]["digest"] + "\n"
+            return SimpleNamespace(stdout=payload)
+
+        with patch("akernel_sdk._image_bridge_guest.subprocess.run", side_effect=run):
+            verify_image_bridge(path)
+        self.assertEqual(calls[0][-1], image["chain_id"])
+        self.assertEqual([c[-1] for c in calls[1:]], [image["reference"], alias])
+
+    def test_prepared_image_verification_rejects_missing_or_changed_inputs(self):
+        path = self.plan()
+        image = json.loads(path.read_text())["images"][0]
+        valid = json.dumps(
+            {
+                "Kind": "Committed",
+                "Labels": {
+                    "containerd.io/snapshot/agent-service.image-root": image["root"]
+                },
+            }
+        )
+        for results, error_type in (
+            ([subprocess.CalledProcessError(1, "ctr")], subprocess.CalledProcessError),
+            (
+                [
+                    SimpleNamespace(stdout=valid),
+                    subprocess.CalledProcessError(1, "docker"),
+                ],
+                subprocess.CalledProcessError,
+            ),
+            (
+                [
+                    SimpleNamespace(stdout=valid),
+                    SimpleNamespace(stdout="sha256:" + "0" * 64),
+                ],
+                RuntimeError,
+            ),
+            (
+                [SimpleNamespace(stdout=valid.replace("Committed", "Active"))],
+                RuntimeError,
+            ),
+            (
+                [SimpleNamespace(stdout=valid.replace(image["root"], "/other"))],
+                RuntimeError,
+            ),
+        ):
+            with self.subTest(results=results):
+                with patch(
+                    "akernel_sdk._image_bridge_guest.subprocess.run",
+                    side_effect=results,
+                ):
+                    with self.assertRaises(error_type):
+                        verify_image_bridge(path)
