@@ -1,5 +1,7 @@
 # AKernel Python SDK
 
+The experimental [managed remote-build runtime](../../builder/managed-docker/README.md) uses official Buildx remote and native Compose rather than the legacy Dockerfile interpreter. Its operator-prepared fresh descriptor binds with `ComposeProject.bind_runtime(sandbox, descriptor)`; this performs no upload, daemon startup, image preparation or build. After checkpoint restore, use `ComposeProject.attach()` so captured services and tunnels are reused. Docker `network_mode: service:...` follows the native namespace owner when exposing a bridge-accessible model tunnel.
+
 `akernel-sdk` is the Python interface for creating and managing remote AKernel
 sandboxes. Applications use one stable API for commands, files, interactive
 PTYs, port forwarding, and reverse tunnels.
