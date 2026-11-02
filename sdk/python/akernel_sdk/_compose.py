@@ -261,6 +261,22 @@ class ComposeProject:
     def descriptor(self) -> dict[str, Any]:
         return json.loads(json.dumps(self._descriptor))
 
+    @classmethod
+    def bind_runtime(
+        cls, sandbox: Sandbox, descriptor: Mapping[str, Any]
+    ) -> ComposeProject:
+        """Bind a newly prepared managed runtime's opaque Compose descriptor.
+
+        Runtime preparation, builds, image registration and daemon startup must
+        already have succeeded. This method performs no remote operation. It
+        permits initial service tunnel creation. Use attach(), never this
+        method, after checkpoint restore: attach only reuses captured tunnels.
+        The operator owns runtime-profile authorization and artifact leases.
+        """
+        result = cls.attach(sandbox, descriptor)
+        result._runtime = DockerRuntime()
+        return result
+
     @property
     def images(self) -> ImageMountPlan | None:
         return self._runtime.images if self._runtime else None
@@ -540,6 +556,26 @@ class ServiceHandle:
             check=True,
         )
         data = json.loads(result.stdout)[0]
+        # Compose network_mode: service:api becomes container:<id> in Docker's
+        # native inspect result. Resolve the namespace owner, keeping the task
+        # network definition and the original service's identity unchanged.
+        visited: set[str] = set()
+        for _ in range(8):
+            mode = data["HostConfig"]["NetworkMode"]
+            if not mode.startswith("container:"):
+                break
+            owner = mode.removeprefix("container:")
+            if not owner or owner in visited:
+                raise ValueError("Cyclic or missing service network namespace owner")
+            visited.add(owner)
+            inspected = sandbox.commands.run(
+                shlex.join(["docker", "inspect", owner]), timeout=20, check=True
+            )
+            data = json.loads(inspected.stdout)[0]
+            if data.get("State", {}).get("Running") is False:
+                raise ValueError("Service network namespace owner is not running")
+        else:
+            raise ValueError("Service network namespace nesting exceeds the limit")
         if data["HostConfig"]["NetworkMode"] == "host":
             endpoints[key] = {**identity, "url": tunnel.url}
             return tunnel.url

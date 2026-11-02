@@ -57,10 +57,33 @@ type Seed struct {
 
 type bridge struct {
 	snapshots.Snapshotter
-	mu      sync.Mutex
-	allowed map[string]bool
-	seeds   []Seed
-	state   string
+	mu       sync.Mutex
+	allowed  map[string]bool
+	seeds    []Seed
+	state    string
+	planPath string
+}
+
+// rootAllowed reloads only the runtime-owned metadata plan when a newly built
+// artifact appears. It never authorizes arbitrary layer extraction or a path
+// supplied by Docker; mounted roots still require immutable references and RO.
+func (b *bridge) rootAllowed(source string) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.allowed[source] {
+		return true, nil
+	}
+	if b.planPath == "" {
+		return false, nil
+	}
+	plan, err := readPlan(b.planPath)
+	if err != nil {
+		return false, err
+	}
+	for _, image := range plan.Images {
+		b.allowed[image.Root] = true
+	}
+	return b.allowed[source], nil
 }
 
 func (b *bridge) Prepare(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
@@ -77,7 +100,11 @@ func (b *bridge) Prepare(ctx context.Context, key, parent string, opts ...snapsh
 		}
 		return b.Snapshotter.Prepare(ctx, key, parent, opts...)
 	}
-	if !b.allowed[source] || parent != "" {
+	allowed, err := b.rootAllowed(source)
+	if err != nil {
+		return nil, fmt.Errorf("invalid runtime image plan: %v: %w", err, errdefs.ErrInvalidArgument)
+	}
+	if !allowed || parent != "" {
 		return nil, fmt.Errorf("unregistered image root or nonempty parent: %w", errdefs.ErrInvalidArgument)
 	}
 	var stat unix.Statfs_t
@@ -166,13 +193,13 @@ func readPlan(path string) (Plan, error) {
 	return plan, nil
 }
 
-func serve(plan Plan, root, socket string) error {
+func serve(plan Plan, root, socket, planPath string) error {
 	sn, err := overlay.NewSnapshotter(root)
 	if err != nil {
 		return err
 	}
 	defer sn.Close()
-	b := &bridge{Snapshotter: sn, allowed: map[string]bool{}, state: filepath.Join(root, "mounted-seeds.json")}
+	b := &bridge{Snapshotter: sn, allowed: map[string]bool{}, state: filepath.Join(root, "mounted-seeds.json"), planPath: planPath}
 	for _, image := range plan.Images {
 		b.allowed[image.Root] = true
 	}
@@ -314,7 +341,7 @@ func main() {
 		log.Fatal(err)
 	}
 	if *mode == "serve" {
-		err = serve(plan, *root, *socket)
+		err = serve(plan, *root, *socket, *planPath)
 	} else if *mode == "register" {
 		err = register(plan, filepath.Dir(*planPath), *address)
 	} else {
