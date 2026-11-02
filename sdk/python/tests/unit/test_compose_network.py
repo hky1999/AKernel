@@ -122,6 +122,45 @@ class ComposeNetworkTest(unittest.TestCase):
             attached.service("worker").expose_tunnel(self.tunnel), self.tunnel.url
         )
 
+    def test_native_service_network_namespace_uses_owners_bridge(self):
+        shared = {
+            "HostConfig": {"NetworkMode": "container:api-id"},
+            "NetworkSettings": {"Networks": {}},
+        }
+        self.sandbox.commands.run.side_effect = [
+            CommandResult(stdout=json.dumps([shared]), stderr="", exit_code=0),
+            CommandResult(stdout=json.dumps([self.inspect]), stderr="", exit_code=0),
+            CommandResult(
+                stdout='{"url":"http://172.28.41.1:19000"}', stderr="", exit_code=0
+            ),
+        ]
+        self.assertEqual(
+            self.service.expose_tunnel(self.tunnel), "http://172.28.41.1:19000"
+        )
+        self.assertIn(
+            "docker inspect api-id", self.sandbox.commands.run.call_args_list[1].args[0]
+        )
+        self.assertIn("172.28.41.2", self.sandbox.commands.run.call_args.args[0])
+
+    def test_cyclic_namespace_owner_does_not_launch_relay(self):
+        shared = {"HostConfig": {"NetworkMode": "container:api-id"}}
+        self.sandbox.commands.run.side_effect = [
+            CommandResult(stdout=json.dumps([shared]), stderr="", exit_code=0),
+            CommandResult(stdout=json.dumps([shared]), stderr="", exit_code=0),
+        ]
+        with self.assertRaisesRegex(ValueError, "Cyclic"):
+            self.service.expose_tunnel(self.tunnel)
+        self.assertEqual(self.sandbox.commands.run.call_count, 2)
+
+    def test_runtime_binding_is_pure_and_preserves_restore_tunnel_fence(self):
+        fresh = ComposeProject.bind_runtime(self.sandbox, self.project.descriptor)
+        self.sandbox.commands.run.assert_not_called()
+        url = fresh.service("worker").expose_tunnel(self.tunnel)
+        restored = MagicMock()
+        attached = ComposeProject.attach(restored, fresh.descriptor)
+        self.assertEqual(attached.service("worker").expose_tunnel(self.tunnel), url)
+        restored.commands.run.assert_not_called()
+
     def test_stale_container_and_unknown_launch_are_never_replayed(self):
         self.service.expose_tunnel(self.tunnel)
         self.mock_identity.return_value = {

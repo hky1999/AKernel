@@ -1,0 +1,69 @@
+import importlib.util
+import unittest
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location(
+    "runtime_compose", Path(__file__).with_name("compose.py")
+)
+compose = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(compose)
+
+
+class NativeBuildContract(unittest.TestCase):
+    def test_native_build_definition_and_cache_inputs_are_preserved(self):
+        native = {
+            "context": "/work/app",
+            "dockerfile": "Dockerfile",
+            "target": "release",
+            "args": {"MODE": "prod"},
+            "secret": ["id=private,src=/run/session"],
+            "cache-from": ["type=registry,ref=registry.test/cache:step"],
+        }
+        plan, refs = compose.build_plan(
+            {},
+            {"services": {"main": {"build": {}}}},
+            {"target": {"main": dict(native)}},
+            "registry.test",
+            "poc/job",
+        )
+        actual = plan["target"]["main"]
+        for key, value in native.items():
+            self.assertEqual(actual[key], value)
+        self.assertNotIn("no-cache", actual)
+        self.assertNotIn("registry.insecure", actual["output"][0])
+        self.assertIn("compression=nydus", actual["output"][0])
+        self.assertEqual(refs, {"main": "registry.test/poc/job/main:built"})
+
+    def test_image_only_conversion_uses_native_dockerfile_frontend(self):
+        image = "registry.test/base@sha256:" + "a" * 64
+        plan, _ = compose.build_plan(
+            {},
+            {"services": {"loadgen": {"image": image}}},
+            {},
+            "registry.test",
+            "poc/job",
+            True,
+            True,
+        )
+        target = plan["target"]["loadgen"]
+        self.assertEqual(target["dockerfile-inline"], "FROM " + image + "\n")
+        self.assertTrue(target["no-cache"])
+        self.assertIn("registry.insecure=true", target["output"][0])
+
+    def test_unsafe_repository_and_image_input_fail_before_build(self):
+        for prefix, image in [
+            ("poc/../other", "alpine:3"),
+            ("poc/job", "ubuntu\nRUN bad"),
+        ]:
+            with self.subTest(prefix=prefix), self.assertRaises(ValueError):
+                compose.build_plan(
+                    {},
+                    {"services": {"main": {"image": image}}},
+                    {},
+                    "registry.test",
+                    prefix,
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()
