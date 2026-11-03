@@ -6,3 +6,7 @@ COPY --chmod=0755 akernel-image-bridge /opt/akernel-image-bridge
 COPY image_bridge_guest.py /usr/lib/akernel/image_bridge_guest.py
 COPY docker_network_guest.py /usr/lib/akernel/docker_network_guest.py
 COPY compose.py /usr/lib/akernel/compose.py
+RUN test -s /usr/lib/akernel/compose.py && \
+    test -s /usr/lib/akernel/image_bridge_guest.py && \
+    test -s /usr/lib/akernel/docker_network_guest.py && \
+    python3 -m py_compile /usr/lib/akernel/*.py
