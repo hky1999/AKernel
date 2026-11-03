@@ -15,64 +15,6 @@ import subprocess
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
-# Platform-owned harness dependency, resolved by native BuildKit.
-PYTHON_HELPER_IMAGE = "docker.io/library/python@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8"
-PYTHON_HELPER_ROOT = "/opt/akernel/harness-python"
-
-
-def helper_targets(
-    targets: dict, exports: dict[str, str], helper_image: str
-) -> dict[str, str]:
-    """Append one reusable tools layer through native linked Bake targets."""
-
-    def fresh(base: str) -> str:
-        name = base
-        while name in targets:
-            name += "_"
-        return name
-
-    helper = fresh("akernel_harness_python")
-    targets[helper] = {
-        "platforms": ["linux/amd64"],
-        "dockerfile-inline": "FROM " + helper_image + " AS prepare\n"
-        "RUN apk add --no-cache patchelf\n"
-        "RUN set -eu; root=" + PYTHON_HELPER_ROOT + "; "
-        'mkdir -p "$root/usr"; cp -a /lib "$root/lib"; '
-        'cp -a /usr/lib "$root/usr/lib"; cp -a /usr/local "$root/usr/local"; '
-        'binary=$(readlink -f "$root/usr/local/bin/python3"); '
-        'patchelf --set-interpreter "$root/lib/ld-musl-x86_64.so.1" '
-        "--force-rpath --set-rpath '$ORIGIN/../lib:$ORIGIN/../../../lib:$ORIGIN/../../lib' "
-        '"$binary"; '
-        '"$root/usr/local/bin/python3" -I -S -c "import json,ssl,sqlite3,ctypes,subprocess,sys; '
-        "subprocess.run([sys.executable,'-I','-S','-c','import json'],check=True)\"\n"
-        "FROM scratch\nCOPY --from=prepare "
-        + PYTHON_HELPER_ROOT
-        + " "
-        + PYTHON_HELPER_ROOT
-        + "\n",
-    }
-    result = {}
-    for source in exports:
-        name = fresh("akernel_export_" + source)
-        original = targets[source]
-        output = {
-            k: original.pop(k) for k in ["tags", "output", "attest"] if k in original
-        }
-        targets[name] = {
-            "platforms": ["linux/amd64"],
-            "dockerfile-inline": "FROM task\nCOPY --link --from=harness "
-            + PYTHON_HELPER_ROOT
-            + " "
-            + PYTHON_HELPER_ROOT
-            + '\nENV PATH="$PATH:'
-            + PYTHON_HELPER_ROOT
-            + '/usr/local/bin"\n',
-            "contexts": {"task": "target:" + source, "harness": "target:" + helper},
-            **output,
-        }
-        result[source] = name
-    return result
-
 
 def execute(args: list[str], *, capture: bool = False) -> str:
     result = subprocess.run(
@@ -117,7 +59,6 @@ def build_plan(
     prefix: str,
     no_cache: bool = False,
     registry_insecure: bool = False,
-    helper_image: str | None = None,
 ) -> tuple[dict, dict[str, str]]:
     """Adapt native Bake targets' output only; do not interpret Dockerfiles."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9/_-]*", prefix) or ".." in prefix:
@@ -152,12 +93,7 @@ def build_plan(
         )
         if no_cache:
             target["no-cache"] = True
-    selected = (
-        helper_targets(targets, references, helper_image)
-        if helper_image
-        else {name: name for name in references}
-    )
-    bake["group"] = {"default": {"targets": list(selected.values())}}
+    bake["group"] = {"default": {"targets": list(references)}}
     return bake, references
 
 
@@ -175,7 +111,6 @@ def build(descriptor: dict, profile: dict, *, no_cache: bool = False) -> dict:
         profile["prefix"],
         no_cache,
         profile.get("registry_insecure", False),
-        PYTHON_HELPER_IMAGE,
     )
     root = Path(descriptor["directory"] + ".build")
     root.mkdir(mode=0o700, exist_ok=True)
@@ -305,7 +240,6 @@ def image_build(context: str, profile: dict, *, no_cache: bool = False) -> dict:
         profile["prefix"],
         no_cache,
         profile.get("registry_insecure", False),
-        PYTHON_HELPER_IMAGE,
     )
     plan_path = context + ".bake.json"
     Path(plan_path).write_text(json.dumps(plan))

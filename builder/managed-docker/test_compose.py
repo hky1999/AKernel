@@ -14,7 +14,7 @@ spec.loader.exec_module(compose)
 
 
 class NativeBuildContract(unittest.TestCase):
-    def test_harness_layer_links_native_targets_without_rewriting_inputs(self):
+    def test_task_image_is_exported_without_python_or_path_mutation(self):
         original = {
             "context": "/original",
             "dockerfile": "Custom.Dockerfile",
@@ -28,22 +28,19 @@ class NativeBuildContract(unittest.TestCase):
             {"target": {"main": dict(original)}},
             "registry.test",
             "poc/job",
-            helper_image=compose.PYTHON_HELPER_IMAGE,
         )
-        for k, v in original.items():
-            self.assertEqual(plan["target"]["main"][k], v)
-        self.assertNotIn("output", plan["target"]["main"])
-        exported = plan["group"]["default"]["targets"][0]
-        target = plan["target"][exported]
-        self.assertEqual(target["contexts"]["task"], "target:main")
-        self.assertEqual(target["tags"], [refs["main"]])
-        self.assertIn("COPY --link", target["dockerfile-inline"])
-        self.assertNotIn("USER", target["dockerfile-inline"])
-        self.assertNotIn("WORKDIR", target["dockerfile-inline"])
+        self.assertEqual(set(plan["target"]), {"main"})
+        self.assertEqual(plan["group"]["default"]["targets"], ["main"])
+        actual = plan["target"]["main"]
+        for key, value in original.items():
+            self.assertEqual(actual[key], value)
+        self.assertEqual(actual["tags"], [refs["main"]])
+        self.assertNotIn("dockerfile-inline", actual)
+        self.assertNotIn("contexts", actual)
 
-    def test_native_name_collisions_cannot_replace_user_targets(self):
+    def test_native_target_names_are_not_reserved_by_harness_helpers(self):
         native = {
-            "akernel_harness_python": {"context": "/native-helper-name"},
+            "akernel_harness_python": {"context": "/user-helper"},
             "main": {"context": "/main"},
         }
         plan, _ = compose.build_plan(
@@ -54,13 +51,12 @@ class NativeBuildContract(unittest.TestCase):
             "poc/job",
             True,
             False,
-            compose.PYTHON_HELPER_IMAGE,
         )
         self.assertEqual(
-            plan["target"]["akernel_harness_python"], {"context": "/native-helper-name"}
+            plan["target"]["akernel_harness_python"], {"context": "/user-helper"}
         )
         self.assertTrue(plan["target"]["main"]["no-cache"])
-        self.assertNotIn("no-cache", plan["target"]["akernel_harness_python_"])
+        self.assertEqual(set(plan["target"]), set(native))
 
     def test_service_discovery_uses_official_compose_and_returns_only_names(self):
         descriptor = {

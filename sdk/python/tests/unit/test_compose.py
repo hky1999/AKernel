@@ -34,6 +34,37 @@ class ComposeTest(unittest.TestCase):
             self.context, [self.file], output_dir=self.root / "prepared", **kwargs
         )
 
+    def test_service_background_command_needs_no_guest_monitor(self):
+        project = ComposeProject.attach(self.sandbox, self.prepare().descriptor)
+        handle = MagicMock(pid=37, command_id="original-command")
+        self.sandbox.commands.run.return_value = handle
+        result = project.service("api").start_command(
+            "exec native-worker 'quoted arg'",
+            cwd="/app",
+            user="worker",
+            envs={"VALUE": "a b"},
+            shell="/bin/bash",
+        )
+        self.assertIs(result, handle)
+        self.sandbox.commands.run.assert_called_once()
+        call = self.sandbox.commands.run.call_args
+        self.assertTrue(call.kwargs["background"])
+        self.assertIn("exec -T -w /app -u worker", call.args[0])
+        self.assertIn("api /bin/bash -c", call.args[0])
+        self.assertNotIn("python", call.args[0])
+        self.sandbox.files.write.assert_not_called()
+
+    def test_service_background_submission_does_not_retry_unknown_outcome(self):
+        project = ComposeProject.attach(self.sandbox, self.prepare().descriptor)
+        failure = BackendOperationError(
+            "lost reply", outcome="unknown", request_id="accepted"
+        )
+        self.sandbox.commands.run.side_effect = failure
+        with self.assertRaises(BackendOperationError) as raised:
+            project.service("api").start_command("worker")
+        self.assertIs(raised.exception, failure)
+        self.sandbox.commands.run.assert_called_once()
+
     def test_frozen_inputs_drive_both_discovery_and_remote_upload(self):
         binary = self.root / "bridge"
         binary.write_bytes(b"fixture")

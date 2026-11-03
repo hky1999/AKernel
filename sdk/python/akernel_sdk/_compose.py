@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from ._service_process import ServiceProcessHandle
+    from .commands import CommandHandle
     from .sandbox import Sandbox
 
 
@@ -901,4 +902,25 @@ class ServiceHandle:
 
         return ServiceProcessHandle.start(
             self, command, cwd=cwd, envs=envs, user=user, shell=shell
+        )
+
+    def start_command(
+        self,
+        command: str,
+        *,
+        cwd: str | None = None,
+        envs: Mapping[str, str] | None = None,
+        user: str | int | None = None,
+        shell: str = "/bin/sh",
+    ) -> CommandHandle:
+        """Start native Compose exec through the sandbox's command API.
+
+        No monitor or Python interpreter is installed in the service. The
+        returned PID belongs to the outer Docker CLI; its stable command_id
+        can be reconnected with restored_sandbox.commands.connect() after a
+        whole-sandbox restore. This does not relaunch the service command.
+        """
+        args = self._args(command, cwd=cwd, envs=envs, user=user, shell=shell)
+        return self.project._require_sandbox().commands.run(
+            self.project.command(args), cwd="/", background=True
         )
