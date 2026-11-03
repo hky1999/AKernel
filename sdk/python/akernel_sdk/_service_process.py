@@ -74,12 +74,13 @@ class ServiceProcessHandle:
     ) -> Any:
         script = Path(__file__).with_name("_service_process_guest.py").read_text()
         command = (
-            "for executable in python3 python /usr/local/bin/python3 "
+            "for executable in /opt/akernel/harness-python/usr/local/bin/python3 "
+            "python3 python /usr/local/bin/python3 "
             "/usr/bin/python3; do "
             'process_python=$(command -v "$executable") || continue; '
-            '"$process_python" -c "import sys;sys.exit(sys.version_info[0]!=3)" '
+            '"$process_python" -I -S -c "import sys;sys.exit(sys.version_info[0]!=3)" '
             "> /dev/null 2>&1 || continue; "
-            'exec "$process_python" -c '
+            'exec "$process_python" -I -S -c '
             + shlex.quote(script)
             + " "
             + shlex.join([operation, self.process_id, argument])

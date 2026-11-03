@@ -14,12 +14,83 @@ spec.loader.exec_module(compose)
 
 
 class NativeBuildContract(unittest.TestCase):
+    def test_harness_layer_links_native_targets_without_rewriting_inputs(self):
+        original = {
+            "context": "/original",
+            "dockerfile": "Custom.Dockerfile",
+            "target": "release",
+            "args": {"MODE": "native"},
+            "secret": ["id=build,src=/secret"],
+        }
+        plan, refs = compose.build_plan(
+            {},
+            {"services": {"main": {"build": {}}}},
+            {"target": {"main": dict(original)}},
+            "registry.test",
+            "poc/job",
+            helper_image=compose.PYTHON_HELPER_IMAGE,
+        )
+        for k, v in original.items():
+            self.assertEqual(plan["target"]["main"][k], v)
+        self.assertNotIn("output", plan["target"]["main"])
+        exported = plan["group"]["default"]["targets"][0]
+        target = plan["target"][exported]
+        self.assertEqual(target["contexts"]["task"], "target:main")
+        self.assertEqual(target["tags"], [refs["main"]])
+        self.assertIn("COPY --link", target["dockerfile-inline"])
+        self.assertNotIn("USER", target["dockerfile-inline"])
+        self.assertNotIn("WORKDIR", target["dockerfile-inline"])
+
+    def test_native_name_collisions_cannot_replace_user_targets(self):
+        native = {
+            "akernel_harness_python": {"context": "/native-helper-name"},
+            "main": {"context": "/main"},
+        }
+        plan, _ = compose.build_plan(
+            {},
+            {"services": {"main": {"build": {}}}},
+            {"target": native},
+            "registry.test",
+            "poc/job",
+            True,
+            False,
+            compose.PYTHON_HELPER_IMAGE,
+        )
+        self.assertEqual(
+            plan["target"]["akernel_harness_python"], {"context": "/native-helper-name"}
+        )
+        self.assertTrue(plan["target"]["main"]["no-cache"])
+        self.assertNotIn("no-cache", plan["target"]["akernel_harness_python_"])
+
     def test_service_discovery_uses_official_compose_and_returns_only_names(self):
-        descriptor = {"project_name": "test", "directory": "/work", "files": ["/work/base.yaml", "/work/override.yaml"]}
+        descriptor = {
+            "project_name": "test",
+            "directory": "/work",
+            "files": ["/work/base.yaml", "/work/override.yaml"],
+        }
         config = {"services": {"main": {"environment": {"SECRET": "private"}}}}
-        with patch.object(compose, "execute", return_value=json.dumps(config)) as execute:
+        with patch.object(
+            compose, "execute", return_value=json.dumps(config)
+        ) as execute:
             self.assertEqual(compose.describe(descriptor), ["main"])
-        self.assertEqual(execute.call_args.args[0], ["docker", "compose", "-p", "test", "--project-directory", "/work", "-f", "/work/base.yaml", "-f", "/work/override.yaml", "config", "--format", "json"])
+        self.assertEqual(
+            execute.call_args.args[0],
+            [
+                "docker",
+                "compose",
+                "-p",
+                "test",
+                "--project-directory",
+                "/work",
+                "-f",
+                "/work/base.yaml",
+                "-f",
+                "/work/override.yaml",
+                "config",
+                "--format",
+                "json",
+            ],
+        )
 
     def test_native_build_definition_and_cache_inputs_are_preserved(self):
         native = {
