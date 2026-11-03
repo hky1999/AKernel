@@ -180,6 +180,10 @@ class ComposeProject:
             local_path.write_text(content)
             local_files.append(local_path)
         runtime = runtime or DockerRuntime()
+        if runtime.profile is not None and (auto_images or prebuilt_images):
+            raise ValueError(
+                "Managed runtime profile owns image discovery and publication"
+            )
         if auto_images:
             if runtime.bridge_binary is None:
                 raise ValueError("Automatic images require a matching bridge binary")
@@ -220,6 +224,7 @@ class ComposeProject:
             "automatic_images": auto_images,
             "environment": dict(environment or {}),
             "directories": dict(directories or {}),
+            "managed_runtime_profile": runtime.profile,
         }
         options = runtime.sandbox_options()
         result._descriptor["sandbox_options"] = {
@@ -302,7 +307,14 @@ class ComposeProject:
         self._runtime.start(sandbox, network=self._descriptor["network"])
         self._sandbox = sandbox
         directory = self._descriptor["directory"]
-        sandbox.files.copy_from_local(str(self._context), directory)
+        if self._descriptor.get("managed_runtime_profile"):
+            from ._managed_build import upload_context
+
+            if self._context is None:
+                raise RuntimeError("Managed project context is unavailable")
+            upload_context(sandbox, self._context, directory)
+        else:
+            sandbox.files.copy_from_local(str(self._context), directory)
         sandbox.files.make_dir(directory + ".config")
         for remote, content in zip(
             self._descriptor["files"], self._contents, strict=True
@@ -314,6 +326,10 @@ class ComposeProject:
                 timeout=20,
                 check=True,
             )
+        if self._descriptor.get("managed_runtime_profile"):
+            sandbox.files.write(
+                directory + ".config/descriptor.json", json.dumps(self._descriptor)
+            )
 
     def reconnect_network(self) -> None:
         """Rebind managed egress rules after restoring to a new outer TAP.
@@ -324,6 +340,11 @@ class ComposeProject:
         identities and existing connections inside the sandbox remain intact;
         connections to external peers do not gain IP-migration guarantees.
         """
+        if self._descriptor.get("managed_runtime_profile"):
+            self._require_sandbox().commands.run(
+                "python3 /usr/lib/akernel/compose.py reconnect", timeout=20, check=True
+            )
+            return
         DockerRuntime.reconnect_network(
             self._require_sandbox(), network=self._descriptor["network"]
         )
@@ -428,6 +449,23 @@ class ComposeProject:
         return result
 
     def build(self, *, no_cache: bool = False, timeout: int = 600) -> None:
+        if self._descriptor.get("managed_runtime_profile"):
+            command = shlex.join(
+                [
+                    "python3",
+                    "/usr/lib/akernel/compose.py",
+                    "build",
+                    "--descriptor",
+                    self._descriptor["directory"] + ".config/descriptor.json",
+                    *(["--no-cache"] if no_cache else []),
+                ]
+            )
+            result = self._execute(command, timeout=timeout)
+            if self._output is not None:
+                (self._output / "build.log").write_text(result.stdout + result.stderr)
+            if result.exit_code != 0:
+                raise ComposeOperationError("build", result)
+            return
         if not self._descriptor["prebuilt_only"]:
             self._operation(["build", *(["--no-cache"] if no_cache else [])], timeout)
 
@@ -438,6 +476,36 @@ class ComposeProject:
         Native Compose pull can still unpack digest references despite its
         missing policy, so use the checked mounted images rather than pull again.
         """
+        if self._descriptor.get("managed_runtime_profile"):
+            result = self._execute(
+                shlex.join(
+                    [
+                        "python3",
+                        "/usr/lib/akernel/compose.py",
+                        "prepare",
+                        "--descriptor",
+                        self._descriptor["directory"] + ".config/descriptor.json",
+                    ]
+                ),
+                timeout=timeout,
+            )
+            if self._output is not None:
+                (self._output / "pull.log").write_text(result.stdout + result.stderr)
+            if result.exit_code != 0:
+                raise ComposeOperationError("prepare", result)
+            attached = self._require_sandbox().commands.run(
+                shlex.join(
+                    ["cat", self._descriptor["directory"] + ".build/attached.json"]
+                ),
+                timeout=20,
+                check=True,
+            )
+            self._descriptor = ComposeProject.attach(
+                self._require_sandbox(), json.loads(attached.stdout)
+            ).descriptor
+            self._descriptor["prebuilt_only"] = True
+            self._descriptor["automatic_images"] = False
+            return
         if self._descriptor["automatic_images"]:
             self._verify_images("pull", timeout)
         elif not self._descriptor["prebuilt_only"]:
@@ -550,6 +618,37 @@ class ServiceHandle:
         if self.project._runtime is None:
             raise RuntimeError("Restored projects can only attach existing tunnels")
         sandbox = self.project._require_sandbox()
+        if self.project._descriptor.get("managed_runtime_profile"):
+            operation_id = uuid4().hex
+            endpoints[key] = {**identity, "operation_id": operation_id}
+            result = sandbox.commands.run(
+                shlex.join(
+                    [
+                        "python3",
+                        "/usr/lib/akernel/compose.py",
+                        "expose",
+                        "--container",
+                        identity["container_id"],
+                        "--port",
+                        str(tunnel.listen_port),
+                    ]
+                ),
+                timeout=30,
+                check=True,
+            )
+            value = json.loads(result.stdout)
+            url = urlsplit(value["url"])
+            if (
+                url.scheme != "http"
+                or not url.hostname
+                or not url.port
+                or url.username
+                or url.query
+                or url.path
+            ):
+                raise ValueError("Runtime returned an invalid service tunnel endpoint")
+            endpoints[key]["url"] = value["url"]
+            return str(value["url"])
         result = sandbox.commands.run(
             shlex.join(["docker", "inspect", identity["container_id"]]),
             timeout=20,

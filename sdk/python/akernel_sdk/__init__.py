@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from ._docker_runtime import DockerRuntime
     from ._image_plan import ImageMountPlan
     from ._image_resolver import prepare_compose_images
+    from ._managed_build import BuiltImage, build_image
     from ._service_process import ServiceProcessHandle
 
 from ._backends.errors import (
@@ -121,9 +122,13 @@ __all__ = [
     "DockerRuntime",
     "ImageMountPlan",
     "prepare_compose_images",
+    "BuiltImage",
+    "build_image",
 ]
 
 _LAZY_IMPORTS = {
+    "BuiltImage": ("._managed_build", "BuiltImage"),
+    "build_image": ("._managed_build", "build_image"),
     "ComposeProject": ("._compose", "ComposeProject"),
     "ComposeOperationError": ("._compose", "ComposeOperationError"),
     "ServiceHandle": ("._compose", "ServiceHandle"),

@@ -15,3 +15,36 @@ BuildKit owns cache validity. Existing worker-local caches reuse steps on the sa
 The preview pins prepared roots until the owned runtime is shut down, including while sandbox checkpoints are retained. Sandboxd's opt-in management endpoint participates in the same shared OCI reference counter as ordinary rootfs consumers, preventing another sandbox's deletion from stopping a referenced ROFS daemon. Persistent snapshot leases, tenant authorization/catalog integration, node-restart recovery and Registry garbage collection require a separate lifecycle design before production release.
 
 Run adapter regressions with `python3 -m unittest discover -s builder/managed-docker -p 'test_*.py'`. SDK changes additionally require `make sdk-check`; helper changes require `go test ./...` in `builder/image-bridge`. Use an owned namespace/data directory and delete sandbox/snapshot records before unmounting collections or deleting Registry storage.
+
+## Platform-owned profile
+
+See [the operator-only Sandboxd configuration](profile.example.toml).
+
+Harbor's maintained managed path sends `managed_runtime_profile="harbor-v1"`.
+`DockerRuntime(profile=...)` forwards only that capability in `extra_config`.
+Sandboxd authorizes the trusted ADX tenant label against the operator allowlist,
+chooses the pinned tool image and creates a distinct collection for each fresh
+environment, including independent verifiers. It injects readonly configuration,
+credentials and collection mounts; client-selected reserved mounts are rejected.
+
+Package `provider_service.py` and `image_provider.py` on the runtime node. The
+all-in-one image includes the opt-in `akernel-managed-images.service`; operators
+supply `/etc/akernel/managed-runtime.env` containing `MANAGED_RUNTIME_ROOT`,
+`MANAGED_IMAGE_SOCKET`, `MANAGED_IMAGE_PORT`, configure matching Sandboxd
+`[plugin.managed_runtime]` / `[plugin.managed_runtime.profiles.harbor-v1]`, then
+start that unit. No unit/profile is enabled by default. Keep the private broker
+and Registry on reachable internal routes. Never expose the image Unix socket.
+
+The Sandboxd profile owns `image` (digest pinned), `registry`, `repository_prefix`,
+`registry_auth_file`, `registry_insecure` (explicit experiment only),
+`buildkit_endpoint`, `provider_url`, `bootstrap_root`, `allowed_tenants`, and `writable_mb`.
+The operator, rather than the Harbor user, builds and publishes the tool image
+from this directory and supplies the matching image-bridge binary in its context.
+
+Checkpoint output includes `managed-runtime.json` with an opaque collection ID,
+tenant and profile fingerprint, without credentials or node paths. Restore checks
+this server-created metadata and reuses the retained collection. Missing or changed
+profile/collection fails closed. It must not rebuild, restart Docker or substitute
+an empty collection. The profile currently retains roots until service drain;
+restore is same-node only. Production multi-tenant Registry tokens, durable leases,
+restart recovery and artifact GC remain separate release requirements.

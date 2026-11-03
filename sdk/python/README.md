@@ -1631,3 +1631,51 @@ and published-port TCP sockets across two snapshot/delete/restore cycles. All
 owned environments and snapshots are deleted; no deployment is changed.
 
 Service process trees freeze waiters before descendants and thaw descendants before waiters. This avoids Bash treating a still-stopped child as an exited tool (status 147); the regression uses a real job-control Bash waiter with a forced scheduler switch. Numeric PID order is not used as ancestry.
+
+### Platform-managed native Docker builds (preview)
+
+When an operator enables a named managed-runtime profile, clients submit its
+capability name. They do not need Docker, Kubernetes access, a Registry route,
+Registry credentials, a node path or an image-bridge executable:
+
+```python
+from akernel_sdk import ComposeProject, DockerRuntime, Sandbox, build_image
+
+artifact = build_image("./environment", profile="harbor-v1")
+sandbox = Sandbox(image=artifact.reference, envs=artifact.envs)
+# Use artifact.cwd / artifact.user as the task's execution defaults.
+sandbox.kill()
+
+project = ComposeProject.prepare(
+    "./environment", ["./environment/docker-compose.yaml"],
+    runtime=DockerRuntime(profile="harbor-v1"), network="bridge",
+)
+sandbox = Sandbox(**project.sandbox_options())
+project.start_runtime(sandbox)
+project.build()  # Official Buildx remote; native Dockerfile frontend and cache.
+project.pull()   # Runtime prepares ROFS and registers the immutable references.
+project.up()
+service = project.service("main")
+# Existing service/process and snapshot interfaces apply unchanged.
+sandbox.kill()
+```
+
+The node authorizes the ADX tenant and supplies the pinned tool image, official
+Buildx endpoint, private Registry account, collection capability and Docker
+runtime configuration. The runtime pushes native Nydus OCI artifacts directly;
+Dragonfly and Sandboxd's existing ROFS image manager distribute shared lowers.
+The SDK only transfers task files, submits operations and returns artifact/service
+handles. It does not interpret Dockerfiles or start a local Docker daemon.
+
+`no_cache=True` is an explicit rebuild choice; fresh environments retain native
+BuildKit cache use by default. Build failure stdout/stderr can be retained using
+`build_image(..., log_path=...)`. Cleanup failures retain environment identity.
+Restore uses `ComposeProject.attach()` and saved descriptors; it never rebuilds
+or reruns Docker startup. Snapshot metadata contains an opaque server-created
+collection identity, checked against the tenant and profile on restore.
+
+This opt-in preview requires same-node retained collections. Their references
+remain pinned until the managed service is drained. Cross-node/restart recovery,
+durable per-snapshot leases and automatic artifact GC are not yet supported.
+The isolated HTTP Registry account is not a multi-tenant scoped Registry token;
+operators must qualify TLS and repository-scoped credentials before wider use.

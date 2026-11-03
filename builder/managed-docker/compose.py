@@ -84,6 +84,7 @@ def build_plan(
 
 
 def build(descriptor: dict, profile: dict, *, no_cache: bool = False) -> dict:
+    os.environ.setdefault("BUILDX_NO_DEFAULT_ATTESTATIONS", "1")
     os.environ.update(descriptor.get("environment", {}))
     command = compose_command(descriptor)
     config = json.loads(execute([*command, "config", "--format", "json"], capture=True))
@@ -177,6 +178,132 @@ def prepare(descriptor: dict, profile: dict) -> dict:
     return {"artifacts": references, "prepared": prepared, "descriptor": attached}
 
 
+def prepare_image(profile: dict, reference: str) -> dict:
+    token = Path(profile["token_file"]).read_text().strip()
+    request = Request(
+        profile["provider"] + "/prepare",
+        data=json.dumps({"reference": reference}).encode(),
+        headers={
+            "Authorization": "Bearer " + token,
+            "Content-Type": "application/json",
+        },
+    )
+    with build_opener(ProxyHandler({})).open(request, timeout=180) as response:
+        return json.loads(response.read(1024 * 1024))
+
+
+def start_builder(profile: dict) -> None:
+    execute(
+        [
+            "docker",
+            "buildx",
+            "create",
+            "--name",
+            profile["builder"],
+            "--driver",
+            "remote",
+            profile["endpoint"],
+            "--use",
+        ]
+    )
+
+
+def image_build(context: str, profile: dict, *, no_cache: bool = False) -> dict:
+    start_builder(profile)
+    target = profile["registry"] + "/" + profile["prefix"] + "/single:built"
+    metadata = context + ".metadata.json"
+    output = (
+        "type=image,name="
+        + target
+        + ",push=true,compression=nydus,force-compression=true,"
+        "oci-mediatypes=true,fs-version=5"
+        + (",registry.insecure=true" if profile.get("registry_insecure") else "")
+    )
+    execute(
+        [
+            "docker",
+            "buildx",
+            "build",
+            "--builder",
+            profile["builder"],
+            "--platform",
+            "linux/amd64",
+            "--provenance=false",
+            "--progress",
+            "plain",
+            "--output",
+            output,
+            "--metadata-file",
+            metadata,
+            *(["--no-cache"] if no_cache else []),
+            context,
+        ]
+    )
+    digest = json.loads(Path(metadata).read_text())["containerimage.digest"]
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ValueError("BuildKit did not return an immutable artifact")
+    return prepare_image(profile, target.rsplit(":", 1)[0] + "@" + digest)
+
+
+def expose_service(container: str, port: int) -> dict:
+    import sys
+
+    sys.path.insert(0, "/usr/lib/akernel")
+    from docker_network_guest import expose
+
+    data = json.loads(execute(["docker", "inspect", container], capture=True))[0]
+    seen = set()
+    for _ in range(8):
+        mode = data["HostConfig"]["NetworkMode"]
+        if not mode.startswith("container:"):
+            break
+        owner = mode.removeprefix("container:")
+        if not owner or owner in seen:
+            raise ValueError("Invalid network namespace ownership")
+        seen.add(owner)
+        data = json.loads(execute(["docker", "inspect", owner], capture=True))[0]
+    else:
+        raise ValueError("Network namespace ownership exceeds limit")
+    if data["HostConfig"]["NetworkMode"] == "host":
+        return {"url": f"http://127.0.0.1:{port}"}
+    connected = []
+    for name, network in (data["NetworkSettings"].get("Networks") or {}).items():
+        if not network.get("IPAddress"):
+            continue
+        network = dict(network)
+        if not network.get("Gateway"):
+            inspected = json.loads(
+                execute(["docker", "network", "inspect", name], capture=True)
+            )[0]
+            import ipaddress
+
+            address = ipaddress.ip_address(network["IPAddress"])
+            gateways = [
+                v.get("Gateway")
+                for v in inspected.get("IPAM", {}).get("Config", [])
+                if v.get("Subnet")
+                and address in ipaddress.ip_network(v["Subnet"], strict=False)
+            ]
+            network["Gateway"] = next((v for v in gateways if v), None)
+        if network.get("Gateway"):
+            connected.append(network)
+    if not connected:
+        raise ValueError("Managed service requires an IPv4 bridge")
+    import uuid
+
+    value = connected[0]
+    # The runtime helper owns the relay process and prints its bound URL.
+    expose(
+        Path("/opt/akernel-docker-runtime/tunnels") / uuid.uuid4().hex,
+        {
+            "address": value["Gateway"],
+            "allowed": [value["IPAddress"]],
+            "target_port": port,
+        },
+    )
+    return {}
+
+
 def start_runtime(profile: dict) -> None:
     import sys
 
@@ -227,31 +354,45 @@ def start_runtime(profile: dict) -> None:
         time.sleep(0.5)
     else:
         raise RuntimeError("Docker readiness timed out")
-    execute(
-        [
-            "docker",
-            "buildx",
-            "create",
-            "--name",
-            profile["builder"],
-            "--driver",
-            "remote",
-            profile["endpoint"],
-            "--use",
-        ]
-    )
+    start_builder(profile)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=["start", "build", "prepare"])
+    parser.add_argument(
+        "operation",
+        choices=["start", "build", "prepare", "image-build", "reconnect", "expose"],
+    )
     parser.add_argument("--profile", default="/run/akernel-build/profile.json")
     parser.add_argument("--descriptor")
     parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument("--context")
+    parser.add_argument("--result")
+    parser.add_argument("--container")
+    parser.add_argument("--port", type=int)
     args = parser.parse_args()
     profile = json.loads(Path(args.profile).read_text())
     if args.operation == "start":
         start_runtime(profile)
+    elif args.operation == "image-build":
+        if not args.context or not args.result:
+            parser.error("image-build requires context and result")
+        Path(args.result).write_text(
+            json.dumps(image_build(args.context, profile, no_cache=args.no_cache))
+        )
+    elif args.operation == "reconnect":
+        import sys
+
+        sys.path.insert(0, "/usr/lib/akernel")
+        from docker_network_guest import configure
+
+        configure(reconnect=True)
+    elif args.operation == "expose":
+        if not args.container or not args.port or not 1 <= args.port <= 65535:
+            parser.error("expose requires container and valid port")
+        result = expose_service(args.container, args.port)
+        if result:
+            print(json.dumps(result))
     else:
         descriptor = json.loads(Path(args.descriptor).read_text())
         result = (
