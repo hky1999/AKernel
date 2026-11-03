@@ -65,3 +65,7 @@ unchanged and are not that candidate. Operators must explicitly stage the matche
 verified package for this POC. Before release, publish matching platform and
 Execd component archives and update both URL/checksum pairs atomically with the
 source pins; do not build a production bundle using mismatched default artifacts.
+
+The source-preview gitlinks use the matching `hky1999` Sandboxd and Agent DX
+forks so submodule initialization can fetch the unmerged candidate commits.
+Restore organization URLs together with reviewed release pins after merge.
