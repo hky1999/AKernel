@@ -6,7 +6,7 @@ The runtime tool image contains Docker, Compose, Buildx and the AKernel snapshot
 
 `image_provider.py` runs on the isolated runtime node. Its session capability accepts only immutable references in an operator-authorized Registry/repository prefix. It validates OCI metadata, calls sandboxd's private image-management Unix socket, and exports existing ROFS through a read-only collection. Dragonfly and the node's existing image manager own content distribution/caching; this adapter does not maintain a second layer cache. `akernel-image-bridge` imports checked metadata and committed roots into inner containerd; unknown extraction roots still fail closed. Private service uppers remain inside the outer sandbox's checkpoint boundary.
 
-The Registry requires private routes from HK workers for push and from runtime nodes for pull. Harbor clients do not require direct Registry access or Kubernetes credentials. Registry credentials are separate from AKernel API keys. This experiment uses private HTTP and a disposable Registry account, matching the deployed Dragonfly HTTP blob profile; TLS trust-chain qualification remains separate. `registry.insecure` is an explicit experiment-profile option, not an unconditional default.
+The Registry requires private routes from HK workers for push and from runtime nodes for pull. Harbor clients do not require direct Registry access or Kubernetes credentials. Registry credentials are separate from AKernel API keys. The experiment profile uses private HTTP, matching the deployed Dragonfly HTTP blob profile; TLS trust-chain qualification remains separate. Standard scoped Bearer authentication can retain access control without applying a password hash to each manifest/blob request. `registry.insecure` is an explicit experiment-profile option, not an unconditional default.
 
 BuildKit owns cache validity. Existing worker-local caches reuse steps on the same worker, but the current HK workers use `emptyDir` and the load balancer does not promise affinity. Cross-worker registry cache import/export is a separate native Buildx policy; runtime Nydus artifacts must not be represented as BuildKit cache records. ROFS and Dragonfly cache final content independently from build-step caches.
 
@@ -18,7 +18,9 @@ Run adapter regressions with `python3 -m unittest discover -s builder/managed-do
 
 ## Platform-owned profile
 
-`registry_auth_file` accepts Sandboxd's flat Basic-auth map or a standard Docker `auths` configuration. Both node admission and the runtime broker normalize root Registry URL keys consistently. Client credential helpers or dynamic token refresh are not implemented by this preview.
+`registry_auth_file` accepts Sandboxd's flat credential map or a standard Docker `auths` configuration for the platform-owned build client. Configure the image manager with a separate pull-only credential; do not give its account push permissions. With standard Registry token authentication, Buildx, the image manager and Nydus exchange credentials for short-lived, repository-scoped Bearer tokens. The private Registry and issuer require authenticated access; private networking is not an authorization policy.
+
+The runtime broker delegates bounded, digest-addressed manifest/config reads to Sandboxd's private `/registry_metadata` Unix interface. Sandboxd reuses `go-containerregistry`'s standard challenge, scoped token reuse and refresh implementation. Neither the SDK nor the Python broker parses credentials or implements a second Bearer protocol. Metadata size/digest validation and collection repository-prefix checks remain mandatory; blob data continues through the existing Dragonfly/ROFS path. The Unix interface is platform-only and is never mounted in a sandbox.
 
 See [the operator-only Sandboxd configuration](profile.example.toml).
 

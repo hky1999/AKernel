@@ -6,12 +6,14 @@ import hashlib
 import hmac
 import json
 import logging
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 import re
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from image_provider import ImageProvider
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeCollections:
@@ -46,7 +48,6 @@ class RuntimeCollections:
                 self.providers[collection] = ImageProvider(
                     self.root / "collections" / collection,
                     record["registry"],
-                    Path(record["auth_file"]),
                     image_socket=self.image_socket,
                     repository_prefix=record["repository_prefix"],
                     scheme=record["scheme"],
@@ -78,8 +79,8 @@ def serve(collections: RuntimeCollections, port: int) -> None:
             except ValueError as error:
                 self.send_error(400, str(error))
                 return
-            except Exception:  # noqa: BLE001 - HTTP boundary; no credentials in errors
-                logging.exception(
+            except Exception:
+                logger.exception(
                     "Managed image preparation failed; inspect the node runtime"
                 )
                 self.send_error(500, "Runtime image preparation failed")
