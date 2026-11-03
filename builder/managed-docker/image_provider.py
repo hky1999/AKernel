@@ -8,52 +8,22 @@ This source-preview service is not a replacement for platform authorization.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import http.client
 import json
 import re
 import socket
-import ssl
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
-from urllib.parse import urlsplit
 
-ACCEPT = ", ".join(  # noqa: FLY002 - readable media-type allowlist
-    [
-        "application/vnd.oci.image.index.v1+json",
-        "application/vnd.oci.image.manifest.v1+json",
-        "application/vnd.docker.distribution.manifest.list.v2+json",
-        "application/vnd.docker.distribution.manifest.v2+json",
-    ]
-)
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 REFERENCE = re.compile(
     r"(?P<host>[^/]+)/(?P<repo>[a-z0-9][a-z0-9_./-]*)@(?P<digest>sha256:[0-9a-f]{64})\Z"
 )
-
-
-def registry_auth(path: Path, registry: str) -> str:
-    """Accept the same static Basic-auth file shapes as Sandboxd registryauth."""
-    config = json.loads(path.read_text())
-    entries = next((v for k, v in config.items() if k.lower() == "auths"), config)
-    matched = ""
-    for key in sorted(entries):
-        target = key.strip().rstrip("/")
-        if target.startswith(("http://", "https://")):
-            url = urlsplit(target)
-            path_part = url.path.strip("/")
-            target = url.netloc + ("/" + path_part if path_part not in ("", "v1", "v2") else "")
-        if target == registry:
-            auth = entries[key].get("Auth") or entries[key].get("auth") or ""
-            if auth:
-                matched = auth
-    if not isinstance(matched, str) or not matched:
-        raise ValueError("Managed Registry credential is unavailable")
-    return matched
 
 
 def digest(payload: bytes) -> str:
@@ -92,7 +62,6 @@ class ImageProvider:
         self,
         root: Path,
         registry: str,
-        auth_file: Path,
         *,
         image_socket: str = "/run/sandboxd/image-api/image.sock",
         repository_prefix: str = "poc/",
@@ -106,11 +75,6 @@ class ImageProvider:
         self.image_socket = image_socket
         self.repository_prefix = repository_prefix
         self.lock = threading.Lock()
-        self.auth = registry_auth(auth_file, registry)
-        # No inherited outbound proxy; distribution uses sandboxd / Dragonfly.
-        self.http = build_opener(
-            ProxyHandler({}), HTTPSHandler(context=ssl.create_default_context())
-        )
         self.metadata = root / ".metadata"
         self.metadata.mkdir(mode=0o755, parents=True, exist_ok=True)
         self.plan = self.metadata / "plan.json"
@@ -135,13 +99,33 @@ class ImageProvider:
     ) -> tuple[dict, dict]:
         if kind not in {"manifests", "blobs"} or not DIGEST.fullmatch(selected):
             raise ValueError("Expected a digest-addressed metadata object")
-        request = Request(
-            f"{self.scheme}://{self.registry}/v2/{repository}/{kind}/{selected}",
-            headers={"Accept": ACCEPT, "Authorization": "Basic " + self.auth},
-        )
-        with self.http.open(request, timeout=60) as response:
-            payload = response.read(16 * 1024**2 + 1)
-            media_type = response.headers.get("Content-Type", "").split(";", 1)[0]
+        # Authentication belongs to Sandboxd's Registry client, including native
+        # Bearer challenges, scoped token reuse and refresh. Never parse Registry
+        # credentials or implement a second authentication protocol in this broker.
+        connection = UnixConnection(self.image_socket)
+        try:
+            connection.request(
+                "POST",
+                "/registry_metadata",
+                body=json.dumps(
+                    {
+                        "reference": f"{self.registry}/{repository}@{selected}",
+                        "kind": kind,
+                        "insecure": self.scheme == "http",
+                    }
+                ),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            if response.status != 200:
+                raise RuntimeError(
+                    f"Registry metadata preparation failed: HTTP {response.status}"
+                )
+            result = json.loads(response.read(24 * 1024**2))
+            payload = base64.b64decode(result["data"], validate=True)
+            media_type = result["media_type"]
+        finally:
+            connection.close()
         if len(payload) > 16 * 1024**2 or digest(payload) != selected:
             raise ValueError("Metadata size or digest mismatch")
         if descriptor and (
@@ -349,7 +333,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--registry", required=True)
-    parser.add_argument("--auth-file", type=Path, required=True)
     parser.add_argument("--token-file", type=Path, required=True)
     parser.add_argument("--prefix", default="poc/")
     parser.add_argument("--scheme", choices=["https", "http"], default="https")
@@ -359,7 +342,6 @@ if __name__ == "__main__":
         ImageProvider(
             args.root,
             args.registry,
-            args.auth_file,
             repository_prefix=args.prefix,
             scheme=args.scheme,
         ),

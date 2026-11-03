@@ -1,8 +1,10 @@
+import base64
 import importlib.util
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 module_spec = importlib.util.spec_from_file_location(
     "provider", Path(__file__).with_name("image_provider.py")
@@ -12,27 +14,32 @@ module_spec.loader.exec_module(provider)
 
 
 class ImageProviderTests(unittest.TestCase):
-    def test_native_docker_and_flat_credentials_match_node_parser(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "auth.json"
-            for config in (
-                {"registry.test": {"Auth": "test-value"}},
-                {"auths": {"registry.test": {"auth": "test-value"}}},
-                {"auths": {"https://registry.test/v1/": {"auth": "test-value"}}},
-            ):
-                path.write_text(json.dumps(config))
-                self.assertEqual(provider.registry_auth(path, "registry.test"), "test-value")
-                with self.assertRaisesRegex(ValueError, "unavailable"):
-                    provider.registry_auth(path, "other.test")
+    def test_metadata_uses_node_authentication_and_checks_digest(self):
+        data = b'{"mediaType":"application/vnd.oci.image.manifest.v1+json"}'
+        identity = provider.digest(data)
+        connection = MagicMock()
+        response = connection.getresponse.return_value
+        response.status = 200
+        response.read.return_value = json.dumps(
+            {"data": base64.b64encode(data).decode(), "media_type": "application/json"}
+        ).encode()
+        with patch.object(provider, "UnixConnection", return_value=connection):
+            obj, _ = self.provider.fetch("poc/main", "manifests", identity)
+        self.assertEqual(obj["mediaType"], "application/vnd.oci.image.manifest.v1+json")
+        self.assertEqual(
+            connection.request.call_args.args[:2], ("POST", "/registry_metadata")
+        )
+        self.assertNotIn(
+            "Authorization", connection.request.call_args.kwargs["headers"]
+        )
+        connection.close.assert_called_once()
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        auth = self.root / "auth.json"
-        auth.write_text(json.dumps({"registry.test": {"Auth": "dGVzdDp0ZXN0"}}))
         self.provider = provider.ImageProvider(
-            self.root / "collection", "registry.test", auth
+            self.root / "collection", "registry.test"
         )
 
     def test_only_authorized_digest_references_are_accepted(self):
