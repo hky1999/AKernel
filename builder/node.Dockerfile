@@ -473,6 +473,7 @@ COPY ./builder/scripts/prepare-adx-config.py /usr/local/libexec/prepare-adx-conf
 COPY ./builder/scripts/adx-service.sh /usr/local/bin/adx-service
 COPY ./builder/scripts/otel-collector-service.sh /usr/local/bin/otel-collector-service
 COPY ./builder/scripts/sandboxd_network_prepare.sh /usr/local/bin/sandboxd-network-prepare
+COPY ./builder/managed-docker/image_provider.py ./builder/managed-docker/provider_service.py /usr/local/lib/akernel/managed-docker/
 ARG FIRECRACKER_KERNEL_PROFILE
 COPY ./builder/config/adx-standalone.yaml /etc/akernel/adx-standalone.yaml
 RUN case "${FIRECRACKER_KERNEL_PROFILE}" in \
