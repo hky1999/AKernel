@@ -14,6 +14,13 @@ spec.loader.exec_module(compose)
 
 
 class NativeBuildContract(unittest.TestCase):
+    def test_service_discovery_uses_official_compose_and_returns_only_names(self):
+        descriptor = {"project_name": "test", "directory": "/work", "files": ["/work/base.yaml", "/work/override.yaml"]}
+        config = {"services": {"main": {"environment": {"SECRET": "private"}}}}
+        with patch.object(compose, "execute", return_value=json.dumps(config)) as execute:
+            self.assertEqual(compose.describe(descriptor), ["main"])
+        self.assertEqual(execute.call_args.args[0], ["docker", "compose", "-p", "test", "--project-directory", "/work", "-f", "/work/base.yaml", "-f", "/work/override.yaml", "config", "--format", "json"])
+
     def test_native_build_definition_and_cache_inputs_are_preserved(self):
         native = {
             "context": "/work/app",
