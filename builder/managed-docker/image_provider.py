@@ -20,6 +20,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
+from urllib.parse import urlsplit
 
 ACCEPT = ", ".join(  # noqa: FLY002 - readable media-type allowlist
     [
@@ -33,6 +34,26 @@ DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 REFERENCE = re.compile(
     r"(?P<host>[^/]+)/(?P<repo>[a-z0-9][a-z0-9_./-]*)@(?P<digest>sha256:[0-9a-f]{64})\Z"
 )
+
+
+def registry_auth(path: Path, registry: str) -> str:
+    """Accept the same static Basic-auth file shapes as Sandboxd registryauth."""
+    config = json.loads(path.read_text())
+    entries = next((v for k, v in config.items() if k.lower() == "auths"), config)
+    matched = ""
+    for key in sorted(entries):
+        target = key.strip().rstrip("/")
+        if target.startswith(("http://", "https://")):
+            url = urlsplit(target)
+            path_part = url.path.strip("/")
+            target = url.netloc + ("/" + path_part if path_part not in ("", "v1", "v2") else "")
+        if target == registry:
+            auth = entries[key].get("Auth") or entries[key].get("auth") or ""
+            if auth:
+                matched = auth
+    if not isinstance(matched, str) or not matched:
+        raise ValueError("Managed Registry credential is unavailable")
+    return matched
 
 
 def digest(payload: bytes) -> str:
@@ -85,8 +106,7 @@ class ImageProvider:
         self.image_socket = image_socket
         self.repository_prefix = repository_prefix
         self.lock = threading.Lock()
-        credentials = json.loads(auth_file.read_text())[registry]
-        self.auth = credentials["Auth"]
+        self.auth = registry_auth(auth_file, registry)
         # No inherited outbound proxy; distribution uses sandboxd / Dragonfly.
         self.http = build_opener(
             ProxyHandler({}), HTTPSHandler(context=ssl.create_default_context())
