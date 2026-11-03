@@ -32,7 +32,7 @@ all-in-one image includes the opt-in `akernel-managed-images.service`; operators
 supply `/etc/akernel/managed-runtime.env` containing `MANAGED_RUNTIME_ROOT`,
 `MANAGED_IMAGE_SOCKET`, `MANAGED_IMAGE_PORT`, configure matching Sandboxd
 `[plugin.managed_runtime]` / `[plugin.managed_runtime.profiles.harbor-v1]`, then
-start that unit. No unit/profile is enabled by default. Keep the private broker
+run `systemctl enable --now akernel-managed-images.service`. No unit/profile is enabled by default. Keep the private broker
 and Registry on reachable internal routes. Never expose the image Unix socket.
 
 The Sandboxd profile owns `image` (digest pinned), `registry`, `repository_prefix`,
