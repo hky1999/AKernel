@@ -55,7 +55,7 @@ class NativeBuildContract(unittest.TestCase):
         self.assertIn("registry.insecure=true", target["output"][0])
 
     def test_namespace_owner_and_internal_network_use_native_inspection(self):
-        relay = MagicMock()
+        relay = MagicMock(return_value={"url": "http://172.28.1.1:23456"})
         values = [
             [{"HostConfig": {"NetworkMode": "container:api-id"}}],
             [
@@ -84,7 +84,9 @@ class NativeBuildContract(unittest.TestCase):
                 sys.modules, {"docker_network_guest": SimpleNamespace(expose=relay)}
             ),
         ):
-            self.assertEqual(compose.expose_service("main-id", 8766), {})
+            self.assertEqual(
+                compose.expose_service("main-id", 8766), relay.return_value
+            )
         self.assertEqual(
             execute.call_args_list[1].args[0], ["docker", "inspect", "api-id"]
         )
