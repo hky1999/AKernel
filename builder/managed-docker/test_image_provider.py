@@ -12,6 +12,19 @@ module_spec.loader.exec_module(provider)
 
 
 class ImageProviderTests(unittest.TestCase):
+    def test_native_docker_and_flat_credentials_match_node_parser(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "auth.json"
+            for config in (
+                {"registry.test": {"Auth": "test-value"}},
+                {"auths": {"registry.test": {"auth": "test-value"}}},
+                {"auths": {"https://registry.test/v1/": {"auth": "test-value"}}},
+            ):
+                path.write_text(json.dumps(config))
+                self.assertEqual(provider.registry_auth(path, "registry.test"), "test-value")
+                with self.assertRaisesRegex(ValueError, "unavailable"):
+                    provider.registry_auth(path, "other.test")
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

@@ -18,6 +18,8 @@ Run adapter regressions with `python3 -m unittest discover -s builder/managed-do
 
 ## Platform-owned profile
 
+`registry_auth_file` accepts Sandboxd's flat Basic-auth map or a standard Docker `auths` configuration. Both node admission and the runtime broker normalize root Registry URL keys consistently. Client credential helpers or dynamic token refresh are not implemented by this preview.
+
 See [the operator-only Sandboxd configuration](profile.example.toml).
 
 Harbor's maintained managed path sends `managed_runtime_profile="harbor-v1"`.
