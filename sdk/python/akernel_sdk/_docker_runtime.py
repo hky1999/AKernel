@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import time
 from dataclasses import dataclass
@@ -59,8 +60,19 @@ class DockerRuntime:
     writable_mb: int = 1024
     writable_backing: str = "file"
     log_dir: Path | None = None
+    profile: str | None = None
 
     def __post_init__(self) -> None:
+        if self.profile is not None:
+            if (
+                not isinstance(self.profile, str)
+                or re.fullmatch(r"[a-z][a-z0-9-]{0,62}", self.profile) is None
+            ):
+                raise ValueError("Invalid managed runtime profile")
+            if self.images is not None or self.bridge_binary is not None:
+                raise ValueError(
+                    "Managed runtime profile owns image preparation and helpers"
+                )
         if (
             isinstance(self.writable_mb, bool)
             or not isinstance(self.writable_mb, int)
@@ -74,6 +86,8 @@ class DockerRuntime:
 
     def sandbox_options(self) -> dict[str, Any]:
         """Return public SDK mount/config options; also required during restore."""
+        if self.profile is not None:
+            return {"extra_config": {"managedRuntimeProfile": self.profile}}
         if self.images is None:
             return {}
         options: dict[str, Any] = {"mounts": self.images.mounts(Mount)}
@@ -168,6 +182,16 @@ class DockerRuntime:
         Never call on a connected/restored sandbox. Fail closed on an existing
         daemon so a retry cannot replace its mounted image/upper state.
         """
+        if self.profile is not None:
+            if network != "bridge":
+                raise ValueError(
+                    "Managed runtime profile owns Docker network configuration"
+                )
+            result = sandbox.commands.run(
+                "python3 /usr/lib/akernel/compose.py start", timeout=180, check=True
+            )
+            self._log("startup.log", result.stdout + result.stderr)
+            return
         if network not in {"host", "bridge"}:
             raise ValueError("Docker network must be host or bridge")
         sandbox.commands.run("test ! -S /var/run/docker.sock", timeout=20, check=True)
