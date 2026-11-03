@@ -37,7 +37,11 @@ and Registry on reachable internal routes. Never expose the image Unix socket.
 
 The Sandboxd profile owns `image` (digest pinned), `registry`, `repository_prefix`,
 `registry_auth_file`, `registry_insecure` (explicit experiment only),
-`buildkit_endpoint`, `provider_url`, `bootstrap_root`, `allowed_tenants`, and `writable_mb`.
+`buildkit_endpoint`, `provider_url`, `bootstrap_root`, `allowed_tenants`, `writable_mb`, and `minimum_root_mb` (defaults to 4096 MiB). The total writable-storage floor is the image upper plus this root-layer reservation. Before starting each worker, run `python3 builder/managed-docker/profile_metadata.py /path/to/sandboxd.toml` and merge the resulting labels into its ADXlet service `config.labels`. Labels contain only profile names and minimum MiB; regenerate them with every storage-geometry change. The SDK queries this authenticated resource metadata using its own connection before allocating a managed sandbox, reserves the default floor, and adds a hard placement condition for compatible workers. Explicit requests or limits below the floor fail before creation. Sandboxd checks the actual total quota again before any collection filesystem changes. Ordinary image sandboxes do not perform this preflight.
+
+Managed Compose inputs are frozen and uploaded unchanged. The runtime's official `docker compose config` resolves services after startup, including native `!reset` and `!override` tags; the SDK does not parse or merge managed YAML. Call `start_runtime()` before obtaining service handles.
+
+The snapshot compatibility fingerprint excludes `allowed_tenants`. Restore still checks the tenant against the current allowlist first: expanding or reordering authorization preserves compatibility; revocation denies restore. Tool, bootstrap, storage and other captured runtime configuration changes remain incompatible. This preview changes the fingerprint format; drain old preview snapshots before upgrading. It does not add service-restart recovery or cross-node portability.
 The operator, rather than the Harbor user, builds and publishes the tool image
 from this directory and supplies the matching image-bridge binary in its context.
 

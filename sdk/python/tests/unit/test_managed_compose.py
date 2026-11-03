@@ -32,7 +32,7 @@ class ManagedCompose(unittest.TestCase):
             self.assertEqual(project.sandbox_options()["mounts"], [])
             sandbox = MagicMock()
             sandbox.commands.run.return_value = CommandResult(
-                stdout="", stderr="", exit_code=0
+                stdout='["main", "api"]', stderr="", exit_code=0
             )
             with (
                 patch.object(DockerRuntime, "start"),
@@ -60,6 +60,46 @@ class ManagedCompose(unittest.TestCase):
                 restored.commands.run.call_args.args[0],
                 "python3 /usr/lib/akernel/compose.py reconnect",
             )
+
+    def test_managed_prepare_preserves_native_merge_tags_without_yaml_parsing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "project"
+            source.mkdir()
+            base = source / "base.yaml"
+            override = source / "override.yaml"
+            base.write_text('services: {main: {image: alpine:3, ports: ["8080:80"]}}')
+            override.write_text(
+                "services: {main: {ports: !reset [], environment: !override {A: B}}}"
+            )
+            with patch(
+                "akernel_sdk._compose._services",
+                side_effect=AssertionError("client parser used"),
+            ):
+                project = ComposeProject.prepare(
+                    source,
+                    [base, override],
+                    runtime=DockerRuntime(profile="harbor-v1"),
+                    output_dir=root / "out",
+                )
+            self.assertEqual(project.descriptor["services"], [])
+            self.assertEqual(
+                (root / "out/source-1.yaml").read_text(), override.read_text()
+            )
+            with self.assertRaisesRegex(RuntimeError, "start_runtime"):
+                project.service("main")
+            sandbox = MagicMock()
+            sandbox.commands.run.return_value = CommandResult(
+                stdout='["main"]', stderr="", exit_code=0
+            )
+            with (
+                patch.object(DockerRuntime, "start"),
+                patch("akernel_sdk._managed_build.upload_context"),
+            ):
+                project.start_runtime(sandbox)
+            self.assertEqual(project.descriptor["services"], ["main"])
+            self.assertIn("compose.py describe", sandbox.commands.run.call_args.args[0])
+            self.assertEqual(project.service("main").name, "main")
 
     def test_restored_project_never_creates_replacement_tunnel(self):
         descriptor = {
