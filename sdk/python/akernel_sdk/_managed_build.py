@@ -55,6 +55,8 @@ def build_image(
     timeout: int = 1800,
     schedule_timeout: int = 180,
     log_path: str | Path | None = None,
+    cpu_request: int | None = None,
+    memory_request: int | None = None,
 ) -> BuiltImage:
     """Submit an original context through an authorized platform build profile.
 
@@ -64,6 +66,10 @@ def build_image(
     success/failure; unknown outcomes are not replayed. Cleanup errors preserve
     the preparation Sandbox identity. The returned image lifetime follows the
     platform profile's retention contract. Timeouts are seconds.
+
+    Optional preparation CPU/memory requests use millicores/MiB. The existing
+    preparation limits remain 1000 millicores and 2048 MiB; these settings do
+    not change task resources or pretend the builder can use unlimited memory.
     """
     from ._docker_runtime import DockerRuntime
     from .sandbox import Sandbox
@@ -74,10 +80,22 @@ def build_image(
         raise ValueError("Native build requires a context containing Dockerfile")
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
         raise ValueError("Build timeout must be a positive integer")
+    for name, request, limit in (
+        ("cpu_request", cpu_request, 1000),
+        ("memory_request", memory_request, 2048),
+    ):
+        if request is not None and (
+            isinstance(request, bool)
+            or not isinstance(request, int)
+            or not 1 <= request <= limit
+        ):
+            raise ValueError(f"{name} must be an integer between 1 and {limit}")
     failure: BaseException | None = None
     builder = Sandbox(
-        cpu=1000,
-        memory=2048,
+        cpu=1000 if cpu_request is None else cpu_request,
+        memory=2048 if memory_request is None else memory_request,
+        cpu_limit=1000,
+        mem_limit=2048,
         idle_timeout=max(300, timeout + 60),
         schedule_timeout=schedule_timeout,
         **options,
