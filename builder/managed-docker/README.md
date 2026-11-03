@@ -48,3 +48,20 @@ profile/collection fails closed. It must not rebuild, restart Docker or substitu
 an empty collection. The profile currently retains roots until service drain;
 restore is same-node only. Production multi-tenant Registry tokens, durable leases,
 restart recovery and artifact GC remain separate release requirements.
+
+## Source and release boundary
+
+[Qualification sources](qualification-sources.json) records the default-branch
+baselines and the same-source Agent DX candidate used by this preview. AKernel's
+default `main` predates the Agent DX migration; this branch retains that migration
+stack, which already contains `main`, rather than reverting to the old backend.
+Sandboxd is rebased onto its current `main`; the gVisor and distill-fs components
+use complete checksum-verified releases matching their current defaults.
+
+The candidate Agent DX platform/Execd package is built and verified through its
+formal `make platform-release` entry. This is an isolated source qualification,
+not a released production bundle. The current default archive download URLs are
+unchanged and are not that candidate. Operators must explicitly stage the matched
+verified package for this POC. Before release, publish matching platform and
+Execd component archives and update both URL/checksum pairs atomically with the
+source pins; do not build a production bundle using mismatched default artifacts.
