@@ -1611,6 +1611,11 @@ handles. It does not interpret Dockerfiles or start a local Docker daemon.
 `no_cache=True` is an explicit rebuild choice; fresh environments retain native
 BuildKit cache use by default. Build failure stdout/stderr can be retained using
 `build_image(..., log_path=...)`. Cleanup failures retain environment identity.
+Optional `cpu_request` (millicores) and `memory_request` (MiB) change only the
+temporary preparation sandbox's scheduling reservation. Its existing limits
+remain 1000 millicores and 2048 MiB; each request must be positive and no greater
+than its limit. Omit these options to preserve the default reservations. Lower
+requests do not provide additional physical capacity for concurrent workloads.
 Restore uses `ComposeProject.attach()` and saved descriptors; it never rebuilds
 or reruns Docker startup. Snapshot metadata contains an opaque server-created
 collection identity, checked against the tenant and profile on restore.
