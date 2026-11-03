@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
@@ -78,6 +79,9 @@ def serve(collections: RuntimeCollections, port: int) -> None:
                 self.send_error(400, str(error))
                 return
             except Exception:  # noqa: BLE001 - HTTP boundary; no credentials in errors
+                logging.exception(
+                    "Managed image preparation failed; inspect the node runtime"
+                )
                 self.send_error(500, "Runtime image preparation failed")
                 return
             self.send_response(200)

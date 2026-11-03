@@ -292,8 +292,8 @@ def expose_service(container: str, port: int) -> dict:
     import uuid
 
     value = connected[0]
-    # The runtime helper owns the relay process and prints its bound URL.
-    expose(
+    # The runtime helper owns the relay process; return its opaque endpoint.
+    return expose(
         Path("/opt/akernel-docker-runtime/tunnels") / uuid.uuid4().hex,
         {
             "address": value["Gateway"],
@@ -301,7 +301,6 @@ def expose_service(container: str, port: int) -> dict:
             "target_port": port,
         },
     )
-    return {}
 
 
 def start_runtime(profile: dict) -> None:
