@@ -15,6 +15,64 @@ import subprocess
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
+# Platform-owned harness dependency, resolved by native BuildKit.
+PYTHON_HELPER_IMAGE = "docker.io/library/python@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8"
+PYTHON_HELPER_ROOT = "/opt/akernel/harness-python"
+
+
+def helper_targets(
+    targets: dict, exports: dict[str, str], helper_image: str
+) -> dict[str, str]:
+    """Append one reusable tools layer through native linked Bake targets."""
+
+    def fresh(base: str) -> str:
+        name = base
+        while name in targets:
+            name += "_"
+        return name
+
+    helper = fresh("akernel_harness_python")
+    targets[helper] = {
+        "platforms": ["linux/amd64"],
+        "dockerfile-inline": "FROM " + helper_image + " AS prepare\n"
+        "RUN apk add --no-cache patchelf\n"
+        "RUN set -eu; root=" + PYTHON_HELPER_ROOT + "; "
+        'mkdir -p "$root/usr"; cp -a /lib "$root/lib"; '
+        'cp -a /usr/lib "$root/usr/lib"; cp -a /usr/local "$root/usr/local"; '
+        'binary=$(readlink -f "$root/usr/local/bin/python3"); '
+        'patchelf --set-interpreter "$root/lib/ld-musl-x86_64.so.1" '
+        "--force-rpath --set-rpath '$ORIGIN/../lib:$ORIGIN/../../../lib:$ORIGIN/../../lib' "
+        '"$binary"; '
+        '"$root/usr/local/bin/python3" -I -S -c "import json,ssl,sqlite3,ctypes,subprocess,sys; '
+        "subprocess.run([sys.executable,'-I','-S','-c','import json'],check=True)\"\n"
+        "FROM scratch\nCOPY --from=prepare "
+        + PYTHON_HELPER_ROOT
+        + " "
+        + PYTHON_HELPER_ROOT
+        + "\n",
+    }
+    result = {}
+    for source in exports:
+        name = fresh("akernel_export_" + source)
+        original = targets[source]
+        output = {
+            k: original.pop(k) for k in ["tags", "output", "attest"] if k in original
+        }
+        targets[name] = {
+            "platforms": ["linux/amd64"],
+            "dockerfile-inline": "FROM task\nCOPY --link --from=harness "
+            + PYTHON_HELPER_ROOT
+            + " "
+            + PYTHON_HELPER_ROOT
+            + '\nENV PATH="$PATH:'
+            + PYTHON_HELPER_ROOT
+            + '/usr/local/bin"\n',
+            "contexts": {"task": "target:" + source, "harness": "target:" + helper},
+            **output,
+        }
+        result[source] = name
+    return result
+
 
 def execute(args: list[str], *, capture: bool = False) -> str:
     result = subprocess.run(
@@ -40,9 +98,11 @@ def compose_command(descriptor: dict) -> list[str]:
 def describe(descriptor: dict) -> list[str]:
     """Resolve service identities natively, without exposing interpolated secrets."""
     os.environ.update(descriptor.get("environment", {}))
-    config = json.loads(execute(
-        [*compose_command(descriptor), "config", "--format", "json"], capture=True
-    ))
+    config = json.loads(
+        execute(
+            [*compose_command(descriptor), "config", "--format", "json"], capture=True
+        )
+    )
     services = config.get("services", {})
     if not services:
         raise ValueError("Compose project requires at least one active service")
@@ -57,6 +117,7 @@ def build_plan(
     prefix: str,
     no_cache: bool = False,
     registry_insecure: bool = False,
+    helper_image: str | None = None,
 ) -> tuple[dict, dict[str, str]]:
     """Adapt native Bake targets' output only; do not interpret Dockerfiles."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9/_-]*", prefix) or ".." in prefix:
@@ -91,7 +152,12 @@ def build_plan(
         )
         if no_cache:
             target["no-cache"] = True
-    bake["group"] = {"default": {"targets": list(references)}}
+    selected = (
+        helper_targets(targets, references, helper_image)
+        if helper_image
+        else {name: name for name in references}
+    )
+    bake["group"] = {"default": {"targets": list(selected.values())}}
     return bake, references
 
 
@@ -109,6 +175,7 @@ def build(descriptor: dict, profile: dict, *, no_cache: bool = False) -> dict:
         profile["prefix"],
         no_cache,
         profile.get("registry_insecure", False),
+        PYTHON_HELPER_IMAGE,
     )
     root = Path(descriptor["directory"] + ".build")
     root.mkdir(mode=0o700, exist_ok=True)
@@ -134,7 +201,12 @@ def build(descriptor: dict, profile: dict, *, no_cache: bool = False) -> dict:
     metadata = json.loads(metadata_path.read_text())
     references = {}
     for name, tagged in targets.items():
-        digest = metadata[name]["containerimage.digest"]
+        exported = next(
+            key
+            for key, value in bake["target"].items()
+            if value.get("tags") == [tagged]
+        )
+        digest = metadata[exported]["containerimage.digest"]
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
             raise ValueError("BuildKit did not return an immutable image digest")
         references[name] = tagged.rsplit(":", 1)[0] + "@" + digest
@@ -221,37 +293,41 @@ def start_builder(profile: dict) -> None:
 
 
 def image_build(context: str, profile: dict, *, no_cache: bool = False) -> dict:
+    os.environ.setdefault("BUILDX_NO_DEFAULT_ATTESTATIONS", "1")
     start_builder(profile)
     target = profile["registry"] + "/" + profile["prefix"] + "/single:built"
     metadata = context + ".metadata.json"
-    output = (
-        "type=image,name="
-        + target
-        + ",push=true,compression=nydus,force-compression=true,"
-        "oci-mediatypes=true,fs-version=5"
-        + (",registry.insecure=true" if profile.get("registry_insecure") else "")
+    plan, _ = build_plan(
+        {},
+        {"services": {"single": {"build": {}}}},
+        {"target": {"single": {"context": context}}},
+        profile["registry"],
+        profile["prefix"],
+        no_cache,
+        profile.get("registry_insecure", False),
+        PYTHON_HELPER_IMAGE,
     )
+    plan_path = context + ".bake.json"
+    Path(plan_path).write_text(json.dumps(plan))
     execute(
         [
             "docker",
             "buildx",
-            "build",
+            "bake",
             "--builder",
             profile["builder"],
-            "--platform",
-            "linux/amd64",
-            "--provenance=false",
+            "--file",
+            plan_path,
             "--progress",
             "plain",
-            "--output",
-            output,
             "--metadata-file",
             metadata,
-            *(["--no-cache"] if no_cache else []),
-            context,
+            "default",
         ]
     )
-    digest = json.loads(Path(metadata).read_text())["containerimage.digest"]
+    values = json.loads(Path(metadata).read_text())
+    exported = plan["group"]["default"]["targets"][0]
+    digest = values[exported]["containerimage.digest"]
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise ValueError("BuildKit did not return an immutable artifact")
     return prepare_image(profile, target.rsplit(":", 1)[0] + "@" + digest)
@@ -372,7 +448,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "operation",
-        choices=["start", "build", "prepare", "describe", "image-build", "reconnect", "expose"],
+        choices=[
+            "start",
+            "build",
+            "prepare",
+            "describe",
+            "image-build",
+            "reconnect",
+            "expose",
+        ],
     )
     parser.add_argument("--profile", default="/run/akernel-build/profile.json")
     parser.add_argument("--descriptor")

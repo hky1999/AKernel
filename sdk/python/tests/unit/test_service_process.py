@@ -3,11 +3,13 @@
 import ctypes
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,6 +103,30 @@ class ServiceProcessTest(unittest.TestCase):
         self.assertEqual(attached.process_id, handle.process_id)
         attached.signal("continue")
         self.assertNotEqual(attached.inspect()[0]["state"], "T")
+
+    def test_helper_ignores_task_import_hooks_and_preserves_child_environment(self):
+        root = Path(self.temp.name)
+        (root / "sitecustomize.py").write_text("print('task startup hook')\n")
+        (root / "json.py").write_text("raise RuntimeError('task shadows json')\n")
+        witness = root / "child-environment"
+        script = (
+            "import os,pathlib,time; pathlib.Path("
+            + repr(str(witness))
+            + ").write_text(os.environ['APP_VALUE']); time.sleep(60)"
+        )
+        command = "exec " + shlex.quote(sys.executable) + " -c " + shlex.quote(script)
+        handle = ServiceProcessHandle.start(
+            self.service,
+            command,
+            cwd=self.temp.name,
+            envs={"PYTHONPATH": self.temp.name, "APP_VALUE": "user-unchanged"},
+        )
+        for _ in range(100):
+            if witness.exists():
+                break
+            time.sleep(0.02)
+        self.assertEqual(witness.read_text(), "user-unchanged")
+        self.assertEqual(handle.inspect()[0]["pid"], handle.pid)
 
     def test_container_restart_refuses_to_signal_old_pid(self):
         handle = self.start()
