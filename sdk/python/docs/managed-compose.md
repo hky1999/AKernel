@@ -1,5 +1,13 @@
 # Managed Compose integration
 
+## Native managed profile (optional preview)
+
+For the platform-managed path, select `DockerRuntime(profile="harbor-v1")`; the operator supplies tools, build connectivity, Registry authorization and shared ROFS preparation. `ComposeProject.prepare()` freezes input without parsing managed YAML. After `Sandbox(**project.sandbox_options())`, call `project.start_runtime(sandbox)` to resolve effective services using the official Compose CLI, then use `build()`, `pull()`, `up()` and service handles. Native merge tags such as `!reset` remain intact.
+
+The SDK resolves this profile's storage floor from authenticated worker metadata before allocation. The example profile reserves 4096 MiB for the private image upper plus 4096 MiB for the root layer, so omitted storage defaults to an 8192 MiB reservation. Explicit requests or limits below the platform floor fail before creation. Eligible-worker placement and Sandboxd's final quota check enforce the same contract; callers do not choose node paths or credentials. Operators must publish the derived metadata described in the [managed-runtime guide](../../../builder/managed-docker/README.md).
+
+Snapshot compatibility excludes the tenant allowlist while restore always checks current authorization. Adding tenants preserves existing snapshots; revoking a tenant denies restore. Upgrading from the earlier fingerprint format requires draining preview snapshots. Durable leases, service-restart recovery, cross-node recovery, tenant-scoped Registry credentials and GC remain unqualified. The following sections describe the legacy client-managed path and its separate prerequisites.
+
 The SDK manages Docker and Compose inside one outer AKernel sandbox. Callers can keep original Dockerfiles and Compose definitions. It is an opt-in Linux/amd64 runsc profile, separate from the lightweight Dockerfile direct-launch parser.
 
 ## Component boundary

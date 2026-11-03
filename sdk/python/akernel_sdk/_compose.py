@@ -164,10 +164,13 @@ class ComposeProject:
         for index, override in enumerate(overrides):
             names.append(f"override-{index}.json")
             contents.append(json.dumps(override))
-        services = _services(contents)
+        runtime = runtime or DockerRuntime()
+        # Managed inputs are interpreted only by the bundled official Compose
+        # CLI. safe_load cannot implement native merge tags, include or profiles.
+        services = {} if runtime.profile is not None else _services(contents)
         # Preserve original definitions; compatibility policy is an extra file.
         selected = set(prebuilt_images or {}) & services.keys()
-        if network == "host":
+        if network == "host" and runtime.profile is None:
             names.append("host.json")
             contents.append(
                 json.dumps(host_network_overlay(services, prebuilt=sorted(selected)))
@@ -179,7 +182,6 @@ class ComposeProject:
             local_path = output / name
             local_path.write_text(content)
             local_files.append(local_path)
-        runtime = runtime or DockerRuntime()
         if runtime.profile is not None and (auto_images or prebuilt_images):
             raise ValueError(
                 "Managed runtime profile owns image discovery and publication"
@@ -327,6 +329,30 @@ class ComposeProject:
                 check=True,
             )
         if self._descriptor.get("managed_runtime_profile"):
+            sandbox.files.write(
+                directory + ".config/descriptor.json", json.dumps(self._descriptor)
+            )
+            result = sandbox.commands.run(
+                shlex.join(
+                    [
+                        "python3",
+                        "/usr/lib/akernel/compose.py",
+                        "describe",
+                        "--descriptor",
+                        directory + ".config/descriptor.json",
+                    ]
+                ),
+                timeout=60,
+                check=True,
+            )
+            services = json.loads(result.stdout)
+            if (
+                not isinstance(services, list)
+                or not services
+                or any(not isinstance(name, str) or not name for name in services)
+            ):
+                raise ValueError("Runtime Compose returned an invalid service list")
+            self._descriptor["services"] = services
             sandbox.files.write(
                 directory + ".config/descriptor.json", json.dumps(self._descriptor)
             )
@@ -562,6 +588,13 @@ class ComposeProject:
         self.run(["down"], timeout=timeout, check=True)
 
     def service(self, name: str) -> ServiceHandle:
+        if (
+            self._descriptor.get("managed_runtime_profile")
+            and not self._descriptor["services"]
+        ):
+            raise RuntimeError(
+                "Managed Compose services are resolved by start_runtime()"
+            )
         if name not in self._descriptor["services"]:
             raise ValueError(f"Unknown Compose service: {name}")
         return ServiceHandle(self, name)

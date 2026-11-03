@@ -17,10 +17,11 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 import adx_environment
@@ -31,6 +32,7 @@ from adx_environment.commands import CommandNotFound as NativeCommandNotFound
 from adx_environment.tunnel_client import TunnelClient
 
 from .._fork import ForkCleanupError, retain_fork_failure
+from .._resource_api import RESOURCE_PATH, parse_resource_nodes
 from .._sandboxes import SandboxQuery
 from ..types import (
     CommandInfo,
@@ -72,6 +74,7 @@ from .errors import (
 
 _NAMESPACE = "default"
 _DEFAULT_LISTEN_PORT = 8766
+_MANAGED_PROFILE_LABEL = "AKERNEL_RUNTIME_PROFILE_"
 # Pinned ADX reserves 30s for initialization and 30s for create handoff. Below
 # this reserve it either rejects the budget or silently increases it.
 _CREATE_RESERVE_SECONDS = 60
@@ -388,7 +391,8 @@ class _CommandsDriver:
     def _handle(self, command: str | int) -> Any:
         handle = (
             self._command_handles.get(command)
-            if isinstance(command, str) else self._handles.get(command)
+            if isinstance(command, str)
+            else self._handles.get(command)
         )
         if handle is None:
             raise NotFoundException(f"no connected command for {command!r}")
@@ -783,7 +787,8 @@ class _Session:
                     and error.outcome == "not_started"
                 ):
                     lease = _ForkSnapshotLease(
-                        snapshot.snapshot_id, {child.id for child in children},
+                        snapshot.snapshot_id,
+                        {child.id for child in children},
                         self._connection,
                     )
                     for child in children:
@@ -825,7 +830,8 @@ class _Session:
                 pending.append(child)
                 errors.append(error)
                 logger.warning(
-                    "failed to clean interrupted fork child %s", child.id,
+                    "failed to clean interrupted fork child %s",
+                    child.id,
                     exc_info=True,
                 )
         try:
@@ -833,7 +839,8 @@ class _Session:
         except BaseException as error:
             errors.append(error)
         retain_fork_failure(
-            failure, snapshot_id=snapshot_id,
+            failure,
+            snapshot_id=snapshot_id,
             created_environment_ids=tuple(
                 child.id for child in (*children, *unreturned)
             ),
@@ -1046,7 +1053,10 @@ class _OwnedSandbox(adx_environment.Environment):
                     )
             if identity and not deleted:
                 _retain_pending_creation(
-                    error, self, kwargs.get("connection"), None,
+                    error,
+                    self,
+                    kwargs.get("connection"),
+                    None,
                     closed=getattr(self, "_closed", False) is True,
                 )
             raise
@@ -1110,15 +1120,21 @@ def _rollback_created(
 
 
 def _retain_pending_creation(
-    failure: BaseException, sandbox: Any, connection: Any,
-    session: BackendSession | None, *, closed: bool,
+    failure: BaseException,
+    sandbox: Any,
+    connection: Any,
+    session: BackendSession | None,
+    *,
+    closed: bool,
 ) -> None:
     """Keep a known bootstrap resource without inferring ownership from errors."""
     context: Any = failure
     pending = tuple(getattr(failure, "_fork_pending_sessions", ()))
     if all(child.id != str(sandbox.id) for child in pending):
-        handle = session if session is not None else _Session._cleanup_handle(
-            sandbox, connection, closed=closed
+        handle = (
+            session
+            if session is not None
+            else _Session._cleanup_handle(sandbox, connection, closed=closed)
         )
         context._fork_pending_sessions = (*pending, handle)
 
@@ -1311,9 +1327,78 @@ class AdxBackend:
                 "Backend 'adx' requires reverse_port to equal listen_port - 1."
             )
 
+    def _managed_storage(
+        self, spec: SandboxSpec
+    ) -> tuple[SandboxSpec, list[dict[str, Any]] | None]:
+        profile = spec.extra_config.get("managedRuntimeProfile")
+        if profile is None:
+            return spec, None
+        if (
+            not isinstance(profile, str)
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,62}", profile) is None
+        ):
+            raise ValueError("Invalid managed runtime profile")
+        key = _MANAGED_PROFILE_LABEL + profile
+        client = EnvironmentClient(connection=self._connection)
+        try:
+            response = client._http.get(client._origin + RESOURCE_PATH, timeout=15)
+            if response.status_code >= 400:
+                raise client._http_error(response)
+            nodes = parse_resource_nodes(response.json())
+        except Exception as error:
+            raise _convert_error("resolve managed runtime resources", error) from error
+        finally:
+            client.close()
+        floors: set[int] = set()
+        for node in nodes:
+            if node.status != 0 or (spec.node_id and node.id != spec.node_id):
+                continue
+            for value in node.labels.get(key, []):
+                if (
+                    len(value) <= 14
+                    and value.isdecimal()
+                    and 0 < int(value) <= (1 << 44) - 1
+                ):
+                    floors.add(int(value))
+        if not floors:
+            raise ValueError(
+                f"Managed runtime profile {profile!r} "
+                "has no ready node resource contract"
+            )
+        eligible = sorted(
+            floor
+            for floor in floors
+            if (spec.storage_mb is None or spec.storage_mb >= floor)
+            and (spec.storage_limit_mb == 0 or spec.storage_limit_mb >= floor)
+        )
+        if not eligible:
+            raise ValueError(
+                f"Managed runtime profile {profile!r} "
+                f"requires at least {min(floors)} MiB "
+                "reserved and total writable storage (upper plus root)"
+            )
+        # Reserve the platform floor before scheduling; constrain placement to
+        # workers with compatible geometry. Ordinary image sandboxes are unchanged.
+        budget = spec.storage_mb if spec.storage_mb is not None else eligible[0]
+        spec = replace(spec, storage_mb=budget)
+        return spec, [
+            {
+                "kind": 0,
+                "affinity": 2,
+                "labelOps": [
+                    {
+                        "type": 0,
+                        "labelKey": key,
+                        "labelValues": [str(v) for v in eligible if v <= budget],
+                    }
+                ],
+            }
+        ]
+
     def create(self, spec: SandboxSpec) -> BackendSession:
         self._validate(spec)
         create_started = time.monotonic()
+        spec, affinities = self._managed_storage(spec)
         rootfs = None
         if spec.rootfs is not None:
             rootfs = adx_environment.S3Config(
@@ -1372,6 +1457,8 @@ class AdxBackend:
             ),
             connection=self._connection,
         )
+        if affinities is not None:
+            create_args["schedule_affinities"] = affinities
         try:
             sandbox = _OwnedSandbox(**create_args)
         except UnsupportedBackendFeatureError:
@@ -1451,7 +1538,7 @@ class AdxBackend:
                     port_forward_mode="tls",
                 ),
                 connection=connection,
-                )
+            )
         except UnsupportedBackendFeatureError:
             raise
         except Exception as error:

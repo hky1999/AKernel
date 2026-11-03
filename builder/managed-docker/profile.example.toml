@@ -14,3 +14,5 @@ buildkit_endpoint = "tcp://buildkit.example.internal:9094"
 provider_url = "http://runtime-node.example.internal:8840"
 allowed_tenants = ["example-tenant"]
 writable_mb = 4096
+# Total scheduling floor is writable_mb + minimum_root_mb.
+minimum_root_mb = 4096

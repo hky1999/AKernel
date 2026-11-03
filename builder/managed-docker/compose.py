@@ -37,6 +37,18 @@ def compose_command(descriptor: dict) -> list[str]:
     return command
 
 
+def describe(descriptor: dict) -> list[str]:
+    """Resolve service identities natively, without exposing interpolated secrets."""
+    os.environ.update(descriptor.get("environment", {}))
+    config = json.loads(execute(
+        [*compose_command(descriptor), "config", "--format", "json"], capture=True
+    ))
+    services = config.get("services", {})
+    if not services:
+        raise ValueError("Compose project requires at least one active service")
+    return list(services)
+
+
 def build_plan(
     descriptor: dict,
     config: dict,
@@ -360,7 +372,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "operation",
-        choices=["start", "build", "prepare", "image-build", "reconnect", "expose"],
+        choices=["start", "build", "prepare", "describe", "image-build", "reconnect", "expose"],
     )
     parser.add_argument("--profile", default="/run/akernel-build/profile.json")
     parser.add_argument("--descriptor")
@@ -394,9 +406,10 @@ if __name__ == "__main__":
             print(json.dumps(result))
     else:
         descriptor = json.loads(Path(args.descriptor).read_text())
-        result = (
-            build(descriptor, profile, no_cache=args.no_cache)
-            if args.operation == "build"
-            else prepare(descriptor, profile)
-        )
+        if args.operation == "describe":
+            result = describe(descriptor)
+        elif args.operation == "build":
+            result = build(descriptor, profile, no_cache=args.no_cache)
+        else:
+            result = prepare(descriptor, profile)
         print(json.dumps(result))

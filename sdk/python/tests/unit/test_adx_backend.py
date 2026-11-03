@@ -71,6 +71,112 @@ class AdxBackendTest(unittest.TestCase):
             token="secret",
         )
 
+    def test_managed_default_reserves_floor_through_native_request_encoding(self):
+        key = "AKERNEL_RUNTIME_PROFILE_harbor-v1"
+        requests = []
+
+        def send(_client, request, **_kwargs):
+            requests.append(request)
+            if request.method == "GET":
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [
+                            {"id": "node-a", "status": 0, "labels": {key: "8192"}},
+                            {"id": "node-b", "status": 0, "labels": {key: "12288"}},
+                        ]
+                    },
+                    request=request,
+                )
+            return httpx.Response(
+                403, json={"message": "stop after encoding"}, request=request
+            )
+
+        with (
+            patch.object(httpx.Client, "send", autospec=True, side_effect=send),
+            self.assertRaises(BackendOperationError),
+        ):
+            adx.AdxBackend(self.config).create(
+                _spec(
+                    extra_config={"managedRuntimeProfile": "harbor-v1"},
+                    node_id="node-a",
+                )
+            )
+        self.assertEqual([r.method for r in requests], ["GET", "POST"])
+        self.assertEqual(
+            str(requests[0].url), "https://api.example/api/environment/v1/resources"
+        )
+        self.assertEqual(requests[0].headers["X-Auth"], "secret")
+        body = json.loads(requests[1].content)
+        self.assertEqual(body["storageMb"], 8192)
+        self.assertEqual(
+            body["scheduleAffinities"][0]["labelOps"],
+            [
+                {"type": 0, "labelKey": key, "labelValues": ["8192"]},
+                {"type": 0, "labelKey": "NODE_ID", "labelValues": ["node-a"]},
+            ],
+        )
+
+    def test_managed_undersized_budgets_or_missing_nodes_never_create(self):
+        key = "AKERNEL_RUNTIME_PROFILE_harbor-v1"
+        for overrides in (
+            {"storage_mb": 4097},
+            {"storage_limit_mb": 4096},
+            {"node_id": "absent"},
+        ):
+            with self.subTest(overrides=overrides):
+                requests = []
+
+                def send(_client, request, _requests=requests, **_kwargs):
+                    _requests.append(request)
+                    return httpx.Response(
+                        200,
+                        json={
+                            "items": [
+                                {"id": "node-a", "status": 0, "labels": {key: "8192"}}
+                            ]
+                        },
+                        request=request,
+                    )
+
+                with (
+                    patch.object(httpx.Client, "send", autospec=True, side_effect=send),
+                    self.assertRaises(ValueError),
+                ):
+                    adx.AdxBackend(self.config).create(
+                        _spec(
+                            extra_config={"managedRuntimeProfile": "harbor-v1"},
+                            **overrides,
+                        )
+                    )
+                self.assertEqual([r.method for r in requests], ["GET"])
+
+    def test_managed_preflight_retains_authorization_errors(self):
+        def deny(_client, request, **_kwargs):
+            return httpx.Response(
+                403,
+                json={
+                    "message": "denied",
+                    "error": {
+                        "code": "PERMISSION_DENIED",
+                        "retry": "never",
+                        "outcome": "not_started",
+                        "requestId": "profile-test",
+                    },
+                },
+                request=request,
+            )
+
+        with (
+            patch.object(httpx.Client, "send", autospec=True, side_effect=deny),
+            self.assertRaises(BackendOperationError) as raised,
+        ):
+            adx.AdxBackend(self.config).create(
+                _spec(extra_config={"managedRuntimeProfile": "harbor-v1"})
+            )
+        self.assertEqual(raised.exception.code, "PERMISSION_DENIED")
+        self.assertEqual(raised.exception.request_id, "profile-test")
+
     def _failed_create_calls(self, stage, ownership):
         calls = []
 
@@ -83,24 +189,33 @@ class AdxBackendTest(unittest.TestCase):
             if action:
                 if (stage == "cwd" and action == "file.make_dir") or stage == "route":
                     return httpx.Response(
-                        403, json={"message": "initialization denied", "error": {
-                            "code": "PERMISSION_DENIED", "retry": "never",
-                            "outcome": "not_started", "requestId": "test",
-                        }}, request=request,
+                        403,
+                        json={
+                            "message": "initialization denied",
+                            "error": {
+                                "code": "PERMISSION_DENIED",
+                                "retry": "never",
+                                "outcome": "not_started",
+                                "requestId": "test",
+                            },
+                        },
+                        request=request,
                     )
                 return httpx.Response(200, json={"processes": []}, request=request)
             payload = {"environmentId": "default-shared", "status": "running"}
             if ownership is not None:
                 payload["newlyCreated"] = ownership
             return httpx.Response(
-                200, headers={"content-type": "text/event-stream"},
+                200,
+                headers={"content-type": "text/event-stream"},
                 content="event: final\ndata: " + json.dumps(payload) + "\n\n",
                 request=request,
             )
 
         tunnel = (
             HttpReverseTunnel(target="http://127.0.0.1:9000")
-            if stage == "tunnel" else None
+            if stage == "tunnel"
+            else None
         )
         with (
             patch.object(httpx.Client, "send", autospec=True, side_effect=send),
@@ -108,11 +223,16 @@ class AdxBackendTest(unittest.TestCase):
         ):
             client.return_value.start.return_value = False
             with self.assertRaises(BackendOperationError):
-                adx.AdxBackend(self.config).create(_spec(
-                    name="shared", detached=True, cpu=2000, memory=4096,
-                    command_cwd="/proc/akernel-review" if stage == "cwd" else None,
-                    reverse_tunnel=tunnel,
-                ))
+                adx.AdxBackend(self.config).create(
+                    _spec(
+                        name="shared",
+                        detached=True,
+                        cpu=2000,
+                        memory=4096,
+                        command_cwd="/proc/akernel-review" if stage == "cwd" else None,
+                        reverse_tunnel=tunnel,
+                    )
+                )
         return calls
 
     def test_failed_native_and_backend_initialization_respect_create_ownership(self):
@@ -133,10 +253,13 @@ class AdxBackendTest(unittest.TestCase):
             return httpx.Response(
                 403,
                 json={
-                    "code": 403, "message": "host mount is not authorized",
+                    "code": 403,
+                    "message": "host mount is not authorized",
                     "error": {
-                        "code": "PERMISSION_DENIED", "retry": "never",
-                        "outcome": "not_started", "requestId": "host-path-test",
+                        "code": "PERMISSION_DENIED",
+                        "retry": "never",
+                        "outcome": "not_started",
+                        "requestId": "host-path-test",
                     },
                 },
                 request=request,
@@ -175,7 +298,8 @@ class AdxBackendTest(unittest.TestCase):
             Mount(target="/inputs", host_path="/apps/inputs"),
             Mount(target="/tools", image_url="tools:v1"),
             Mount(
-                target="/weights", type="erofs",
+                target="/weights",
+                type="erofs",
                 s3_config=S3Config("https://s3.example", "data", "weights.img"),
             ),
         )
@@ -189,9 +313,15 @@ class AdxBackendTest(unittest.TestCase):
 
     def test_create_preserves_public_error_context_and_cause(self):
         error = EnvironmentHTTPError(
-            504, {}, "CPU cannot fit", code="DEADLINE_EXCEEDED",
-            retry="never", outcome="not_started", request_id="create-test",
-            operation_id="op-test", environment_id="default-test",
+            504,
+            {},
+            "CPU cannot fit",
+            code="DEADLINE_EXCEEDED",
+            retry="never",
+            outcome="not_started",
+            request_id="create-test",
+            operation_id="op-test",
+            environment_id="default-test",
         )
         error.scheduling_failure = {"rejections": {"insufficient_cpu": 3}}
         with (
@@ -202,15 +332,24 @@ class AdxBackendTest(unittest.TestCase):
         public = raised.exception
         self.assertIs(public.__cause__, error)
         for field in (
-            "code", "retry", "outcome", "request_id", "operation_id",
-            "environment_id", "status_code", "scheduling_failure",
+            "code",
+            "retry",
+            "outcome",
+            "request_id",
+            "operation_id",
+            "environment_id",
+            "status_code",
+            "scheduling_failure",
         ):
             self.assertEqual(getattr(public, field), getattr(error, field), field)
 
     def test_unknown_create_retains_same_operation_guidance(self):
         error = adx.adx_environment.EnvironmentError(
-            "response lost", code="OUTCOME_UNKNOWN", retry="same_operation",
-            outcome="unknown", request_id="create-unknown",
+            "response lost",
+            code="OUTCOME_UNKNOWN",
+            retry="same_operation",
+            outcome="unknown",
+            request_id="create-unknown",
             environment_id="default-unknown",
         )
         with (

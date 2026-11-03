@@ -78,7 +78,6 @@ def build_image(
     builder = Sandbox(
         cpu=1000,
         memory=2048,
-        storage_mb=8192,
         idle_timeout=max(300, timeout + 60),
         schedule_timeout=schedule_timeout,
         **options,
