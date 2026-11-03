@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "stage": "isolated-source-preview",
+  "upstream_defaults": {
+    "akernel": {"branch": "main", "commit": "19cb17153d2c3925ed46fd665353063d33eef70c"},
+    "sandboxd": {"branch": "main", "commit": "7075d76c38ac7917e9aa407607e82462b7c4e4b2"},
+    "agent_dx": {"branch": "master", "commit": "d1c8df02c175a8b8d5f43091b3346da14e80e7ee"},
+    "gvisor": {"branch": "develop", "commit": "63de4896444eb140221c1284fa621394666224af", "release": "release-20261012.0-akernel.3"},
+    "distill_fs": {"branch": "main", "commit": "90227ac3a2f9fb919cfabc3e346b560ecae193e7", "release": "v0.1.3"}
+  },
+  "candidate_agent_dx": "20bb6ca6f37816c149af07aea0e52382ea3fec66",
+  "afs_enabled": false,
+  "envd_enabled": false,
+  "production_deployment_updated": false,
+  "publication_requirement": "Publish matching platform and Execd archives from the candidate source, then update default download URLs/checksums together before releasing this integration. Existing default downloads are not this qualified candidate."
+}
