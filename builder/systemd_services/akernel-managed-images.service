@@ -2,6 +2,7 @@
 Description=AKernel managed Docker image collection broker (opt-in)
 After=sandboxd.service
 Requires=sandboxd.service
+PartOf=sandboxd.service
 ConditionPathExists=/etc/akernel/managed-runtime.env
 
 [Service]
@@ -11,4 +12,4 @@ Restart=on-failure
 UMask=0077
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=sandboxd.service
