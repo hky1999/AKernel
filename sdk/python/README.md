@@ -1642,7 +1642,7 @@ Registry credentials, a node path or an image-bridge executable:
 from akernel_sdk import ComposeProject, DockerRuntime, Sandbox, build_image
 
 artifact = build_image("./environment", profile="harbor-v1")
-sandbox = Sandbox(image=artifact.reference, envs=artifact.envs)
+sandbox = Sandbox(image=artifact.reference, env=artifact.envs)
 # Use artifact.cwd / artifact.user as the task's execution defaults.
 sandbox.kill()
 
