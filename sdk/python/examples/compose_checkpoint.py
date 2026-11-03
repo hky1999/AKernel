@@ -4,14 +4,14 @@ Requires an owned endpoint with the managed Compose runtime prerequisites.
 Example: python sdk/python/examples/compose_checkpoint.py ./project \
     --file ./project/compose.yaml \
     --bridge /absolute/path/akernel-image-bridge --service worker \
-    --command 'exec python3 worker.py'
+    --command 'exec ./worker'
 """
 
 import argparse
 import tempfile
 from pathlib import Path
 
-from akernel_sdk import ComposeProject, DockerRuntime, Sandbox, ServiceProcessHandle
+from akernel_sdk import ComposeProject, DockerRuntime, Sandbox
 
 
 def main() -> None:
@@ -45,22 +45,18 @@ def main() -> None:
                 project.build()
                 project.pull()
                 project.up()
-                process = project.service(args.service).start_process(args.command)
-                process.signal("stop")
-                # An application also saves its aligned client-side state here.
+                process = project.service(args.service).start_command(args.command)
+                # Sandboxd/runsc captures all processes without guest signals.
                 snapshot = source.create_snapshot(timeout=300)
-                project_state, process_state = project.descriptor, process.descriptor
+                project_state, command_id = project.descriptor, process.command_id
             # Context exit acknowledges deletion before the clone continues.
             with Sandbox.from_snapshot(
                 snapshot, failover=False, **project.sandbox_options()
             ) as restored:
                 attached = ComposeProject.attach(restored, project_state)
                 attached.reconnect_network()
-                original = ServiceProcessHandle.attach(
-                    attached.service(args.service), process_state
-                )
-                original.signal("continue")
-                print("Restored original service PID", original.pid)
+                original = restored.commands.connect(command_id)
+                print("Restored original command", original.command_id)
                 print("Exit code:", original.wait(timeout=300))
         finally:
             if snapshot is not None:

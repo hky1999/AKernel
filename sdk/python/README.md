@@ -1524,7 +1524,7 @@ across different manifests/configs are supported after OCI configuration checks.
 
 ```python
 from pathlib import Path
-from akernel_sdk import ComposeProject, DockerRuntime, Sandbox, ServiceProcessHandle
+from akernel_sdk import ComposeProject, DockerRuntime, Sandbox
 
 project = ComposeProject.prepare(
     "./project", ["./project/docker-compose.yaml"],
@@ -1543,19 +1543,17 @@ try:
     project.up(wait_timeout=600)
     worker = project.service("worker")
     print(worker.exec("uname -s").stdout)  # POSIX sh by default
-    process = worker.start_process("exec python3 worker.py", cwd="/app")
-    process.signal("stop")
+    process = worker.start_command("exec ./worker", cwd="/app")
     snapshot = sandbox.create_snapshot(timeout=300)
-    project_state, process_state = project.descriptor, process.descriptor
+    project_state, command_id = project.descriptor, process.command_id
     # Persist these JSON descriptors with application/harness state as needed.
-    sandbox.kill()                      # fence source before continuing clone
+    sandbox.kill()                      # fence source before creating running clone
     restored = Sandbox.from_snapshot(snapshot, cwd="/", failover=False,
                                      **project.sandbox_options())
     try:
         attached = ComposeProject.attach(restored, project_state)
         attached.reconnect_network()    # rebind owned NAT/forwarding rules only
-        original = ServiceProcessHandle.attach(attached.service("worker"), process_state)
-        original.signal("continue")     # original PID/process, no build/up/start
+        original = restored.commands.connect(command_id)  # no build/up/relaunch
     finally:
         restored.kill()
         Sandbox.delete_snapshot(snapshot.snapshot_id)
@@ -1563,7 +1561,9 @@ finally:
     sandbox.kill()
 ```
 
-`ServiceHandle` provides exec, upload/download (including directories), stop and process start. Select shell, login behavior, cwd, user and environment explicitly; the SDK does not assign a special main service. `ServiceProcessHandle` uses a stable process token, Docker container ID/start time and Linux process start time. Its in-service monitor and identity record are captured with the sandbox. It supports inspect, tree stop/continue/terminate/kill and exit-code wait. Python 3 is required only for managed service processes, not ordinary service exec. The process is detached from the short-lived docker-exec submission; outer command PIDs are not used to signal the inner process.
+`ServiceHandle` provides exec, upload/download (including directories), stop and process start. `start_command()` starts native Compose exec through the sandbox command API without installing a service monitor or requiring Python in the service. Its handle PID belongs to the outer Docker CLI; persist its stable `command_id` and reconnect through `restored.commands.connect(command_id)` after whole-sandbox restore. The runtime captures the Docker CLI, dockerd and inner process together. Do not use the outer PID to signal an inner service process. Whole-sandbox checkpointing requires no application stop/continue or model-idle barrier.
+
+The separate explicit `start_process()` API returns a `ServiceProcessHandle` for callers that need inner PID/tree signalling. Select shell, login behavior, cwd, user and environment explicitly; the SDK does not assign a special main service. `ServiceProcessHandle` uses a stable process token, Docker container ID/start time and Linux process start time. Its in-service monitor and identity record are captured with the sandbox. It supports inspect, tree stop/continue/terminate/kill and exit-code wait. Python 3 is required only for managed service processes, not ordinary service exec. The process is detached from the short-lived docker-exec submission; outer command PIDs are not used to signal the inner process.
 
 Unknown start failures retain `error.process_descriptor`; attach using that token to observe the original execution instead of submitting it again. A restarted/replaced container or changed process identity is rejected. A partial runtime startup is fresh-only and cannot be replayed on the same project object; delete the owned sandbox after failure. Compose failures retain phase, exit code, stdout/stderr and diagnostic logs. The SDK never silently retries a side-effecting Compose operation with an unknown outcome.
 
