@@ -1,6 +1,10 @@
 import importlib.util
+import json
+import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 spec = importlib.util.spec_from_file_location(
     "runtime_compose", Path(__file__).with_name("compose.py")
@@ -49,6 +53,45 @@ class NativeBuildContract(unittest.TestCase):
         self.assertEqual(target["dockerfile-inline"], "FROM " + image + "\n")
         self.assertTrue(target["no-cache"])
         self.assertIn("registry.insecure=true", target["output"][0])
+
+    def test_namespace_owner_and_internal_network_use_native_inspection(self):
+        relay = MagicMock()
+        values = [
+            [{"HostConfig": {"NetworkMode": "container:api-id"}}],
+            [
+                {
+                    "HostConfig": {"NetworkMode": "project-private"},
+                    "NetworkSettings": {
+                        "Networks": {
+                            "private": {"IPAddress": "172.28.1.2", "Gateway": ""}
+                        }
+                    },
+                }
+            ],
+            [
+                {
+                    "IPAM": {
+                        "Config": [{"Subnet": "172.28.1.0/24", "Gateway": "172.28.1.1"}]
+                    }
+                }
+            ],
+        ]
+        with (
+            patch.object(
+                compose, "execute", side_effect=[json.dumps(v) for v in values]
+            ) as execute,
+            patch.dict(
+                sys.modules, {"docker_network_guest": SimpleNamespace(expose=relay)}
+            ),
+        ):
+            self.assertEqual(compose.expose_service("main-id", 8766), {})
+        self.assertEqual(
+            execute.call_args_list[1].args[0], ["docker", "inspect", "api-id"]
+        )
+        self.assertEqual(
+            relay.call_args.args[1],
+            {"address": "172.28.1.1", "allowed": ["172.28.1.2"], "target_port": 8766},
+        )
 
     def test_unsafe_repository_and_image_input_fail_before_build(self):
         for prefix, image in [
