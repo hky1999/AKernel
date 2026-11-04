@@ -90,6 +90,15 @@ Address behavior is deterministic:
   use 443 for HTTPS/WSS and 80 for HTTP/WS; an explicit port is preserved.
   Exec and file transfer continue to use `AKERNEL_SERVER_ADDRESS`.
 
+For a shared HTTPS control and tunnel entrypoint, set both addresses explicitly:
+
+```bash
+export AKERNEL_SERVER_ADDRESS="https://akernel.example.com"
+export AKERNEL_GATEWAY_ADDRESS="$AKERNEL_SERVER_ADDRESS"
+```
+
+The shell expands the double-quoted variable in this example. The SDK does not expand `$NAME` or `${NAME}` within address values and rejects unresolved variables before creating a sandbox. Use literal URLs in configuration files whose loader does not expand variables.
+
 ### TLS certificate verification
 
 `AKERNEL_VERIFY_TLS` controls certificate-chain and hostname verification for
@@ -1429,6 +1438,8 @@ public exception: `code`, `retry`, `outcome`, `request_id`, `operation_id`,
 are `None`; the original exception remains in `__cause__`. `cleanup_errors` is a
 tuple of rollback failures (empty when absent). Known-created IDs and these
 errors are also attached to interruption exceptions without changing their type.
+
+`first_error` retains the native client's first failed attempt when a later retry reports a different failure; otherwise it is `None`. The final exception's `code`, `retry` and `outcome` still govern retry and cleanup decisions. The original final native exception remains in `__cause__`.
 
 ```python
 from akernel_sdk import BackendOperationError, Sandbox
