@@ -18,7 +18,7 @@
   },
   "candidate_gitlinks": {
     "sandboxd": "653d4b92f9322face90ed3092a0bad141e204286",
-    "agent_dx": "bab8fe14a90723e64458c7d2281a9289eb0f92aa"
+    "agent_dx": "73de66bfca796f12605ff9433131bce87963eca8"
   },
   "pinned_runtime_artifacts": {
     "gvisor": {
