@@ -61,12 +61,11 @@ restart recovery and artifact GC remain separate release requirements.
 
 ## Source and release boundary
 
-[Qualification sources](qualification-sources.json) records the default-branch
-baselines and the same-source Agent DX candidate used by this preview. AKernel's
-default `main` predates the Agent DX migration; this branch retains that migration
-stack, which already contains `main`, rather than reverting to the old backend.
-Sandboxd is rebased onto its current `main`; the gVisor and distill-fs components
-use complete checksum-verified releases matching their current defaults.
+[Qualification sources](qualification-sources.json) records the explicit review
+baselines, candidate component sources and pinned runtime artifacts. This change
+targets AKernel `develop`, Sandboxd `main` and Agent DX `master`. Source references
+alone do not establish which version is deployed or how much load it passed;
+qualification receipts must record the actual image digests and workload.
 
 The candidate Agent DX platform/Execd package is built and verified through its
 formal `make platform-release` entry. This is an isolated source qualification,
