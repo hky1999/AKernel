@@ -13,12 +13,12 @@
     },
     "agent_dx": {
       "branch": "master",
-      "commit": "d2337849eff8ffcd39b3a3d34d91840ae573b508"
+      "commit": "ec4d2108187ed819575340c492c7657840af8024"
     }
   },
   "candidate_gitlinks": {
-    "sandboxd": "a2ce494dbe4550ed9d5cbe54100a97de6de4288f",
-    "agent_dx": "d39387fa0510793c7bc54509b2c5316b74210bc8"
+    "sandboxd": "8760ca581852940d58241f6255d8c35867da781e",
+    "agent_dx": "824850f494447384b9c06ccb1a709003c0315fb0"
   },
   "pinned_runtime_artifacts": {
     "gvisor": {
