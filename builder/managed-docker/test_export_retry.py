@@ -20,6 +20,7 @@ spec.loader.exec_module(compose)
 
 COMMAND = ["docker", "buildx", "bake", "--file", "/frozen/bake.json", "default"]
 MISSING = b'ERROR: failed to solve: failed to get compression blob "nydus": not found\n'
+MERGE_MISSING = b'ERROR: failed to solve: merge nydus layers: get compression blob "nydus": not found\n'
 
 
 def process(code, stderr):
@@ -92,6 +93,15 @@ class NativeExportRetryTest(unittest.TestCase):
         self.assertEqual(calls[0].args, (COMMAND,))
         self.assertIn(MISSING, output)
         self.assertIn(b"retry 2/3", output)
+        self.assertEqual(sleeps, 1)
+
+    def test_same_variant_failure_during_merge_is_also_retryable(self):
+        calls, output, sleeps = self.run_export(
+            [process(1, MERGE_MISSING), process(0, b"done\n")]
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
+        self.assertIn(MERGE_MISSING, output)
         self.assertEqual(sleeps, 1)
 
     def test_persistent_export_failure_is_bounded_and_diagnostic_tail_is_bounded(self):

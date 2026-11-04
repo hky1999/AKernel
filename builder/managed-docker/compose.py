@@ -55,7 +55,13 @@ def execute_bake(args: list[str], plan: dict) -> None:
         known_export_failure = (
             code == 1
             and terminal
-            and 'failed to get compression blob "nydus": not found' in terminal[-1]
+            and any(
+                message in terminal[-1]
+                for message in (
+                    'failed to get compression blob "nydus": not found',
+                    'merge nydus layers: get compression blob "nydus": not found',
+                )
+            )
         )
         if not known_export_failure or attempt + 1 == attempts:
             raise error
