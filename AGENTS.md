@@ -196,6 +196,13 @@ covers the archive, not a bare runsc binary. Keep CI's final-image payload
 checks synchronized; do not mix helper versions or fetch them at runtime.
 
 The sandboxd submodule supplies the source compiled by `make build`.
+For native Kubernetes snapshots spanning control/worker upgrades, preserve the
+qualified EROFS runtime bytes independently of the platform image. The opt-in
+`node.runtimeRootfsPin` stages a digest-pinned source runtime on the existing
+node data disk and verifies the source/current static Execd hashes before a
+read-only mount. Keep the pin unchanged during control-only upgrades and retain
+referenced cache files; do not relax runsc superblock checks or claim arbitrary
+guest-runtime migration. See `deploy/docs/runtime-rootfs-pinning.md`.
 Helm and standalone enable `runsc.background_restore` and `checkpoint_sync.sync_output`;
 runtime files and private writable layers remain on node-local storage.
 AKernel's `builder/distill-fs-versions.env` fixes the distill-fs release URL
