@@ -12,7 +12,8 @@ BuildKit owns cache validity. Existing worker-local caches reuse steps on the sa
 
 The runtime retains streamed Buildx diagnostics and allows at most three attempts
 of the same native Bake command when Buildx definitively exits1 with the terminal
-`failed to get compression blob "nydus": not found` export error. Any native
+`failed to get compression blob "nydus": not found` export error, including its
+`merge nydus layers: get compression blob` variant. Any native
 `no-cache` target limits the operation to one attempt. Build failures, access
 errors, process/transport exceptions, and signal exits propagate directly. This
 is bounded recovery for an observed remote exporter/cache failure; it does not
