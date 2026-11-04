@@ -138,7 +138,11 @@ def _log_creation_budgets(
     logger.debug(
         "sandbox lifecycle budgets operation=%s schedule_timeout=%s "
         "init_timeout=%s create_timeout=%s idle_timeout=%s policy_source=request",
-        operation, spec.schedule_timeout, spec.init_timeout, timeout, spec.idle_timeout,
+        operation,
+        spec.schedule_timeout,
+        spec.init_timeout,
+        timeout,
+        spec.idle_timeout,
     )
 
 
@@ -307,6 +311,7 @@ def _convert_error(operation: str, error: Exception) -> BackendOperationError:
         request_forwarded=getattr(error, "request_forwarded", None),
         cleanup_errors=getattr(error, "cleanup_errors", ()) or (),
         command_id=getattr(error, "command_id", None),
+        first_error=getattr(error, "first_error", None),
     )
 
 
@@ -743,7 +748,9 @@ class _Session:
             self._spec.init_timeout if init_timeout is None else init_timeout
         )
         timeout = resolve_create_timeout(
-            self._spec.schedule_timeout, child_init_timeout, restore_timeout,
+            self._spec.schedule_timeout,
+            child_init_timeout,
+            restore_timeout,
             name="restore_timeout",
         )
         # The pinned ADX API has snapshot/create/delete primitives, not a batch

@@ -362,6 +362,42 @@ class AdxBackendTest(unittest.TestCase):
         self.assertIsNone(raised.exception.status_code)
         self.assertIsNone(raised.exception.scheduling_failure)
 
+    def test_create_retains_first_native_failure_and_final_retry_guidance(self):
+        first = EnvironmentHTTPError(
+            503,
+            {},
+            "initial service failure",
+            code="SERVICE_UNAVAILABLE",
+            retry="same_operation",
+            outcome="unknown",
+            request_id="create-first",
+        )
+        final = EnvironmentHTTPError(
+            504,
+            {},
+            "deadline expired during ownership lookup",
+            code="DEADLINE_EXCEEDED",
+            retry="same_operation",
+            outcome="unknown",
+            request_id="create-final",
+            environment_id="default-pending",
+        )
+        final.first_error = first
+        with (
+            patch.object(adx, "_OwnedSandbox", side_effect=final),
+            self.assertRaises(BackendOperationError) as raised,
+        ):
+            adx.AdxBackend(self.config).create(_spec())
+        public = raised.exception
+        self.assertIs(public.first_error, first)
+        self.assertIs(public.__cause__, final)
+        self.assertEqual(public.code, "DEADLINE_EXCEEDED")
+        self.assertEqual(public.request_id, "create-final")
+        self.assertEqual(public.environment_id, "default-pending")
+        self.assertEqual(public.retry, "same_operation")
+        self.assertEqual(public.outcome, "unknown")
+        self.assertIs(adx._convert_error("cleanup", public).first_error, first)
+
     def test_unstructured_error_does_not_invent_execution_outcome(self):
         error = adx._convert_error("create sandbox", RuntimeError("local failure"))
         self.assertIsNone(error.code)
@@ -369,6 +405,7 @@ class AdxBackendTest(unittest.TestCase):
         self.assertIsNone(error.outcome)
         self.assertIsNone(error.request_id)
         self.assertIsNone(error.environment_id)
+        self.assertIsNone(error.first_error)
         self.assertEqual(
             str(BackendOperationError("existing caller")), "existing caller"
         )

@@ -36,6 +36,8 @@ class BackendOperationError(RuntimeError):
     instructions; callers must not infer execution state from the message or
     an HTTP status. The original backend error remains available as the cause.
     ``cleanup_errors`` retains rollback failures without replacing that cause.
+    ``first_error`` retains the native client's earliest failed attempt without
+    changing the final error's retry/outcome guidance.
     """
 
     def __init__(
@@ -55,6 +57,7 @@ class BackendOperationError(RuntimeError):
         request_forwarded: bool | None = None,
         cleanup_errors: tuple[BaseException, ...] = (),
         command_id: str | None = None,
+        first_error: BaseException | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -70,6 +73,7 @@ class BackendOperationError(RuntimeError):
         self.request_forwarded = request_forwarded
         self.cleanup_errors = cleanup_errors
         self.command_id = command_id
+        self.first_error = first_error
 
 
 class AuthenticationException(BackendOperationError):
