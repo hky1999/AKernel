@@ -5,20 +5,20 @@
   "upstream_baselines": {
     "akernel": {
       "branch": "develop",
-      "commit": "0057e2b047474ac1b1a070c45be4247fd6d9fc27"
+      "commit": "c7a3998e4ad1b45c89048ce8cb8c57fcdbe7e38f"
     },
     "sandboxd": {
       "branch": "main",
-      "commit": "51e1561c3fa6ea1f45ca8296337502467c493cbb"
+      "commit": "fbe69e566859718414a207fa780b8dab363b9381"
     },
     "agent_dx": {
       "branch": "master",
-      "commit": "8b0d0d4dc4f3dea398cba73017212fb2f21a7af2"
+      "commit": "d2337849eff8ffcd39b3a3d34d91840ae573b508"
     }
   },
   "candidate_gitlinks": {
-    "sandboxd": "653d4b92f9322face90ed3092a0bad141e204286",
-    "agent_dx": "183028296cd63f282f71d405e23d4d6de03efb9e"
+    "sandboxd": "a2ce494dbe4550ed9d5cbe54100a97de6de4288f",
+    "agent_dx": "4588168b0e174692287dd73e6aed58926e72749b"
   },
   "pinned_runtime_artifacts": {
     "gvisor": {
