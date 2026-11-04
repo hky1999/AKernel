@@ -26,6 +26,14 @@ The runtime broker delegates bounded, digest-addressed manifest/config reads to 
 
 See [the operator-only Sandboxd configuration](profile.example.toml).
 
+Size the control plane separately from task sandboxes. The
+[core-chart capacity overlay](control-capacity.example.yaml) records the explicit
+Coordinator budget used for the large-catalog preview, including retained
+snapshot tombstones. It changes no task resource limits and is not a concurrency
+guarantee. Apply it as an operator Helm values file, nested under `core` when
+using the umbrella chart. Track Coordinator memory, restarts and request latency;
+catalog filtering fixes do not eliminate the need for a suitable control budget.
+
 Harbor's maintained managed path sends `managed_runtime_profile="harbor-v1"`.
 `DockerRuntime(profile=...)` forwards only that capability in `extra_config`.
 Sandboxd authorizes the trusted ADX tenant label against the operator allowlist,
