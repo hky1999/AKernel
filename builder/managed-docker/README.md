@@ -10,6 +10,16 @@ The Registry requires private routes from HK workers for push and from runtime n
 
 BuildKit owns cache validity. Existing worker-local caches reuse steps on the same worker, but the current HK workers use `emptyDir` and the load balancer does not promise affinity. Cross-worker registry cache import/export is a separate native Buildx policy; runtime Nydus artifacts must not be represented as BuildKit cache records. ROFS and Dragonfly cache final content independently from build-step caches.
 
+The runtime retains streamed Buildx diagnostics and allows at most three attempts
+of the same native Bake command when Buildx definitively exits1 with the terminal
+`failed to get compression blob "nydus": not found` export error. Any native
+`no-cache` target limits the operation to one attempt. Build failures, access
+errors, process/transport exceptions, and signal exits propagate directly. This
+is bounded recovery for an observed remote exporter/cache failure; it does not
+repair the BuildKit implementation or establish an exactly-once contract for
+external side effects in Dockerfile instructions. Final metadata and runtime
+image registration are used only after a successful Bake result.
+
 `ComposeProject.bind_runtime(sandbox, descriptor)` binds a newly prepared runtime and permits initial peer-restricted tunnel creation. `ComposeProject.attach()` remains the restore binding: it must not start daemons, build, run Compose up or create replacement tunnels. `network_mode: service:...` is resolved using Docker's native namespace-owner inspection, preserving the task's network configuration.
 
 The preview pins prepared roots until the owned runtime is shut down, including while sandbox checkpoints are retained. Sandboxd's opt-in management endpoint participates in the same shared OCI reference counter as ordinary rootfs consumers, preventing another sandbox's deletion from stopping a referenced ROFS daemon. Persistent snapshot leases, tenant authorization/catalog integration, node-restart recovery and Registry garbage collection require a separate lifecycle design before production release.

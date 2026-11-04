@@ -12,6 +12,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+import time
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -21,6 +23,49 @@ def execute(args: list[str], *, capture: bool = False) -> str:
         args, check=True, text=True, stdout=subprocess.PIPE if capture else None
     )
     return result.stdout if capture else ""
+
+
+def execute_bake(args: list[str], plan: dict) -> None:
+    """Retry a completed Nydus variant export failure using the same native plan.
+
+    Buildx progress is streamed while retaining only a bounded diagnostic tail.
+    Native no-cache targets have a single attempt. Transport/process exceptions
+    propagate with their original identity rather than becoming another solve.
+    """
+    if args[:3] != ["docker", "buildx", "bake"]:
+        raise ValueError("Expected the native Buildx Bake command")
+    attempts = 1 if any(t.get("no-cache") for t in plan["target"].values()) else 3
+    for attempt in range(attempts):
+        tail = b""
+        with subprocess.Popen(args, stderr=subprocess.PIPE) as process:
+            assert process.stderr is not None
+            while chunk := process.stderr.read(4096):
+                sys.stderr.buffer.write(chunk)
+                sys.stderr.buffer.flush()
+                tail = (tail + chunk)[-65536:]
+            code = process.wait()
+        if code == 0:
+            return
+        error = subprocess.CalledProcessError(code, args, stderr=tail)
+        terminal = [
+            line
+            for line in tail.decode(errors="replace").splitlines()
+            if line.startswith("ERROR:")
+        ]
+        known_export_failure = (
+            code == 1
+            and terminal
+            and 'failed to get compression blob "nydus": not found' in terminal[-1]
+        )
+        if not known_export_failure or attempt + 1 == attempts:
+            raise error
+        print(
+            f"AKernel: native Nydus export exited {code}; retry {attempt + 2}/{attempts} "
+            "with the same Bake plan and native cache (first failure retained above).",
+            file=sys.stderr,
+            flush=True,
+        )
+        time.sleep(1)
 
 
 def compose_command(descriptor: dict) -> list[str]:
@@ -117,7 +162,7 @@ def build(descriptor: dict, profile: dict, *, no_cache: bool = False) -> dict:
     plan_path = root / "bake.json"
     plan_path.write_text(json.dumps(bake))
     metadata_path = root / "metadata.json"
-    execute(
+    execute_bake(
         [
             "docker",
             "buildx",
@@ -131,7 +176,8 @@ def build(descriptor: dict, profile: dict, *, no_cache: bool = False) -> dict:
             "--progress",
             "plain",
             "default",
-        ]
+        ],
+        bake,
     )
     metadata = json.loads(metadata_path.read_text())
     references = {}
@@ -243,7 +289,7 @@ def image_build(context: str, profile: dict, *, no_cache: bool = False) -> dict:
     )
     plan_path = context + ".bake.json"
     Path(plan_path).write_text(json.dumps(plan))
-    execute(
+    execute_bake(
         [
             "docker",
             "buildx",
@@ -257,7 +303,8 @@ def image_build(context: str, profile: dict, *, no_cache: bool = False) -> dict:
             "--metadata-file",
             metadata,
             "default",
-        ]
+        ],
+        plan,
     )
     values = json.loads(Path(metadata).read_text())
     exported = plan["group"]["default"]["targets"][0]
@@ -360,8 +407,6 @@ def start_runtime(profile: dict) -> None:
             env=env,
             start_new_session=True,
         )
-    import time
-
     for _ in range(40):
         if process.poll() is not None:
             raise RuntimeError("Docker exited; inspect /var/log/akernel-dockerd.log")
