@@ -31,6 +31,14 @@ Run adapter regressions with `python3 -m unittest discover -s builder/managed-do
 
 ## Platform-owned profile
 
+Native builds publish to a fresh invocation tag and return immutable digests.
+If Buildx exits with the specific post-publication `unknown blob ... in history`
+error, the runtime inspects every planned output with the official Docker CLI
+and verifies its raw manifest digest, size and platform. It adopts the published
+outputs only after all checks pass, records the original error in a publication
+receipt, and does not replay the build. Missing or partial publication, ordinary
+build errors, authentication failures and unknown command outcomes still fail.
+
 Managed builds export the original native Docker/Buildx targets directly. They do not append an application interpreter, synthetic harness layer or PATH entries. Whole-sandbox checkpoint/restore is performed externally by Sandboxd/runsc and requires no Python or process-tree stop/continue in task images. Runtime control tools may use Python in the platform's own tools image; this is separate from application image requirements.
 
 `registry_auth_file` accepts Sandboxd's flat credential map or a standard Docker `auths` configuration for the platform-owned build client. Configure the image manager with a separate pull-only credential; do not give its account push permissions. With standard Registry token authentication, Buildx, the image manager and Nydus exchange credentials for short-lived, repository-scoped Bearer tokens. The private Registry and issuer require authenticated access; private networking is not an authorization policy.
