@@ -89,14 +89,6 @@ targets AKernel `develop`, Sandboxd `main` and Agent DX `master`. Source referen
 alone do not establish which version is deployed or how much load it passed;
 qualification receipts must record the actual image digests and workload.
 
-The candidate Agent DX platform/Execd package is built and verified through its
-formal `make platform-release` entry. This is an isolated source qualification,
-not a released production bundle. The current default archive download URLs are
-unchanged and are not that candidate. Operators must explicitly stage the matched
-verified package for this POC. Before release, publish matching platform and
-Execd component archives and update both URL/checksum pairs atomically with the
-source pins; do not build a production bundle using mismatched default artifacts.
+The Agent DX source reference and default platform/Execd archive URL/checksum pairs select the same published upstream release. Verify its architecture, complete manifests and matching platform/component Execd bytes before packaging. Source pins alone do not qualify cluster behavior, and downloaded AFS/envd payloads do not enable those capabilities. Keep the deployment's qualified guest-runtime pin when testing control/worker upgrades against retained checkpoints.
 
-The source-preview gitlinks use the matching `hky1999` Sandboxd and Agent DX
-forks so submodule initialization can fetch the unmerged candidate commits.
-Restore organization URLs together with reviewed release pins after merge.
+The source-preview Sandboxd gitlink uses the `hky1999` fork so submodule initialization can fetch its unmerged candidate. Agent DX uses its upstream repository. Restore Sandboxd's organization URL and reviewed source pin together after merge; this preview is not a production release approval.
