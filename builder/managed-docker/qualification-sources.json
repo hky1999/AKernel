@@ -18,7 +18,7 @@
   },
   "candidate_gitlinks": {
     "sandboxd": "8d889329ae5ad7dd731f0e41cd604ab8182e7300",
-    "agent_dx": "09478c9e23aee1e59360492230a56200c9f3252e"
+    "agent_dx": "d8d8fea64bf45ad745cb7fc264f58ab42cb7dc6d"
   },
   "pinned_runtime_artifacts": {
     "gvisor": {
@@ -40,9 +40,14 @@
   "candidate_patch": {
     "agent_dx": {
       "source_commit": "3432d411b60eddc0eb33899c4f191b0cdf745e5f",
-      "rebased_commit": "09478c9e23aee1e59360492230a56200c9f3252e",
-      "reason": "Latest master still truncates catalog publication at the generic RPC timeout; preserve the separately qualified remaining-budget repair.",
-      "pull_request": "https://github.com/openJiuwen-ai/agent-dx/pull/212"
+      "rebased_commit": "d8d8fea64bf45ad745cb7fc264f58ab42cb7dc6d",
+      "reason": "Preserve the remaining publication budget, isolate independent checkpoint reference/catalog commits, and fence local deletion RPCs against new artifact references. Cluster and release qualification are recorded separately.",
+      "pull_request": "https://github.com/openJiuwen-ai/agent-dx/pull/212",
+      "candidate_commits": [
+        "09478c9e23aee1e59360492230a56200c9f3252e",
+        "dbc5a44e5e7acc4d8435b3a44cb766bf50096ea3",
+        "d8d8fea64bf45ad745cb7fc264f58ab42cb7dc6d"
+      ]
     }
   }
 }
