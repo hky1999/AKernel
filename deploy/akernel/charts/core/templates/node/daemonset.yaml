@@ -1,5 +1,8 @@
 {{- $runtimePin := .Values.node.runtimeRootfsPin | default dict }}
 {{- if $runtimePin.enabled }}
+{{- if and ($runtimePin.currentExecdSha256 | default "") (not (regexMatch "^[a-f0-9]{64}$" $runtimePin.currentExecdSha256)) }}
+{{- fail "runtimeRootfsPin.currentExecdSha256 must be a separately qualified SHA256" }}
+{{- end }}
 {{- if or .Values.adx.e2b.enabled (contains "://" ($runtimePin.sourceImage | default "")) (not (regexMatch "^[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}$" ($runtimePin.sourceImage | default ""))) (not (regexMatch "^[a-f0-9]{64}$" ($runtimePin.sha256 | default ""))) (not (regexMatch "^[a-f0-9]{64}$" ($runtimePin.execdSha256 | default ""))) }}
 {{- fail "runtimeRootfsPin requires ADX without E2B, a digest-pinned source image, and rootfs/Execd SHA256 values" }}
 {{- end }}
@@ -95,7 +98,11 @@ spec:
             - --sha256
             - {{ $runtimePin.sha256 | quote }}
             - --execd-sha256
+            {{- if eq $mode "verify" }}
+            - {{ $runtimePin.currentExecdSha256 | default $runtimePin.execdSha256 | quote }}
+            {{- else }}
             - {{ $runtimePin.execdSha256 | quote }}
+            {{- end }}
           securityContext: {runAsUser: 0, runAsGroup: 0, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true}
           volumeMounts:
             - {name: akernel-node-config, mountPath: /config, readOnly: true}

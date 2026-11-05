@@ -183,6 +183,9 @@ node:
     sourceImage: ""
     sha256: ""
     execdSha256: ""
+    # Defaults to execdSha256. A different carrier executable requires explicit
+    # old-guest/new-platform C/R qualification; the pinned guest stays unchanged.
+    currentExecdSha256: ""
   directoryHelper:
     # Package the script for the init-container example without invoking it.
     # Disabled by default to preserve the node rollout checksum.
