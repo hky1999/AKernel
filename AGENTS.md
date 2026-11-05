@@ -973,6 +973,12 @@ Publish native builds under fresh invocation tags. Reconcile only the known
 post-publication Buildx history error, using official Docker inspection and
 verified immutable manifests for every planned output. Preserve the original
 error and fail on partial publication; do not replay an unknown build outcome.
+The exact post-publication internal deadline additionally requires every fresh
+target's completed push acknowledgement to match its inspected manifest digest;
+explicit attestations require native completion. Exit 100 alone proves neither
+history failure nor publication. Default optional metadata provenance to Docker's
+supported disabled mode while preserving operator overrides; do not claim this
+repairs the BuildKit server's history or storage paths.
 
 The experimental remote-build path in `builder/managed-docker` delegates Dockerfile and Compose parsing/builds to the official Docker CLI, Compose, and Buildx remote driver. The existing HK BuildKit deployment is unchanged; its native Nydus exporter publishes to an operator-provided internal Distribution Registry. Single-image builds use the broker's metadata-only `/describe` result and leave final rootfs acquisition to the final sandbox; never mount a task image on a disposable build helper just to read its process defaults. Compose image preparation uses sandboxd's existing image manager and Dragonfly/ROFS cache, with a private, operator-authorized image collection. Keep the broker's explicit owner and collection-flock protocol synchronized with Sandboxd's node-local live/checkpoint leases; missing/copied lease markers fail closed, and unknown legacy collections require an operator drain. Neither local mount release nor an expired capability authorizes Registry artifact deletion. Cross-node reconstruction, per-tenant Registry authorization and artifact GC remain separate release requirements. Do not add Dockerfile instructions to the legacy SDK interpreter for this path. `ComposeProject.bind_runtime()` accepts a fresh runtime-prepared opaque descriptor without remote startup; checkpoint recovery must continue using pure `attach()` and captured tunnel descriptors.
 
