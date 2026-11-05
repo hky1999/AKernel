@@ -23,7 +23,9 @@ image registration are used only after a successful Bake result.
 
 `ComposeProject.bind_runtime(sandbox, descriptor)` binds a newly prepared runtime and permits initial peer-restricted tunnel creation. `ComposeProject.attach()` remains the restore binding: it must not start daemons, build, run Compose up or create replacement tunnels. `network_mode: service:...` is resolved using Docker's native namespace-owner inspection, preserving the task's network configuration.
 
-The preview pins prepared roots until the owned runtime is shut down, including while sandbox checkpoints are retained. Sandboxd's opt-in management endpoint participates in the same shared OCI reference counter as ordinary rootfs consumers, preventing another sandbox's deletion from stopping a referenced ROFS daemon. Persistent snapshot leases, tenant authorization/catalog integration, node-restart recovery and Registry garbage collection require a separate lifecycle design before production release.
+Single-container `image-build` returns verified artifact/process metadata through the authorized `/describe` operation without mounting or registering the task rootfs on its temporary build helper's node. The final single-container sandbox mounts that image through the ordinary runtime path. Compose `/prepare` still registers the ROFS lower required by inner containerd. Both operations retain digest, platform and repository-prefix validation and use the same session capability.
+
+Versioned managed collections use Sandboxd's node-local live/checkpoint leases. The broker holds the collection's `flock` during each operation and sends its explicit owner to the private image-management API. The last live/in-flight/retained-checkpoint reference releases exported roots and management ownership while preserving ordinary rootfs consumers; retained managed checkpoints intentionally keep dependencies alive and count toward the node's ROFS budget. Missing/copied checkpoint markers fail closed. Legacy collections remain pinned for an operator drain because their history cannot be inferred safely. Deploy the broker and Sandboxd together: the new management API rejects anonymous ownership, and old Sandboxd rejects the new owner field. See Sandboxd's checkpoint/restore contract for local-filesystem and recovery requirements. Cross-node reconstruction and Registry artifact GC remain separate work.
 
 Run adapter regressions with `python3 -m unittest discover -s builder/managed-docker -p 'test_*.py'`. SDK changes additionally require `make sdk-check`; helper changes require `go test ./...` in `builder/image-bridge`. Use an owned namespace/data directory and delete sandbox/snapshot records before unmounting collections or deleting Registry storage.
 
@@ -66,7 +68,7 @@ The Sandboxd profile owns `image` (digest pinned), `registry`, `repository_prefi
 
 Managed Compose inputs are frozen and uploaded unchanged. The runtime's official `docker compose config` resolves services after startup, including native `!reset` and `!override` tags; the SDK does not parse or merge managed YAML. Call `start_runtime()` before obtaining service handles.
 
-The snapshot compatibility fingerprint excludes `allowed_tenants`. Restore still checks the tenant against the current allowlist first: expanding or reordering authorization preserves compatibility; revocation denies restore. Tool, bootstrap, storage and other captured runtime configuration changes remain incompatible. This preview changes the fingerprint format; drain old preview snapshots before upgrading. It does not add service-restart recovery or cross-node portability.
+The snapshot compatibility fingerprint excludes `allowed_tenants`. Restore still checks the tenant against the current allowlist first: expanding or reordering authorization preserves compatibility; revocation denies restore. Tool, bootstrap, storage and other captured runtime configuration changes remain incompatible. The older fingerprint format remains incompatible; drain those preview snapshots before upgrading their profile. Node-local lease recovery does not imply cross-node portability or a qualified arbitrary runtime upgrade.
 The operator, rather than the Harbor user, builds and publishes the tool image
 from this directory and supplies the matching image-bridge binary in its context.
 
@@ -74,9 +76,10 @@ Checkpoint output includes `managed-runtime.json` with an opaque collection ID,
 tenant and profile fingerprint, without credentials or node paths. Restore checks
 this server-created metadata and reuses the retained collection. Missing or changed
 profile/collection fails closed. It must not rebuild, restart Docker or substitute
-an empty collection. The profile currently retains roots until service drain;
-restore is same-node only. Production multi-tenant Registry tokens, durable leases,
-restart recovery and artifact GC remain separate release requirements.
+an empty collection. Versioned checkpoints additionally retain their local collection
+lease marker; collection leases and checkpoint output must share a filesystem.
+Restore is same-node only. Production multi-tenant Registry tokens, cross-node
+reconstruction and Registry artifact GC remain separate release requirements.
 
 ## Source and release boundary
 

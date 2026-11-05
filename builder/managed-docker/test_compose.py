@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,45 @@ spec.loader.exec_module(compose)
 
 
 class NativeBuildContract(unittest.TestCase):
+    def test_single_build_returns_metadata_without_preparing_helper_rootfs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context = str(Path(directory) / "context")
+            Path(context).mkdir()
+            profile = {
+                "registry": "registry.test",
+                "prefix": "poc/job",
+                "builder": "remote",
+                "endpoint": "tcp://builder:9094",
+            }
+            identity = "sha256:" + "a" * 64
+            artifact = {
+                "reference": "registry.test/poc/job/single@" + identity,
+                "image_process": {"WorkingDir": "/app"},
+            }
+
+            def bake(args, _plan):
+                metadata = args[args.index("--metadata-file") + 1]
+                Path(metadata).write_text(
+                    json.dumps({"single": {"containerimage.digest": identity}})
+                )
+
+            with (
+                patch.object(compose, "start_builder"),
+                patch.object(compose, "execute_bake", side_effect=bake),
+                patch.object(
+                    compose, "describe_image", create=True, return_value=artifact
+                ) as describe,
+                patch.object(
+                    compose,
+                    "prepare_image",
+                    side_effect=AssertionError(
+                        "build helper must not pin a task rootfs"
+                    ),
+                ),
+            ):
+                self.assertEqual(compose.image_build(context, profile), artifact)
+            describe.assert_called_once_with(profile, artifact["reference"])
+
     def test_task_image_is_exported_without_python_or_path_mutation(self):
         original = {
             "context": "/original",
