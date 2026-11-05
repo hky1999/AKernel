@@ -8,12 +8,15 @@ session capability and pins its complete collection until session cleanup.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -74,6 +77,134 @@ def execute_bake(args: list[str], plan: dict) -> None:
         time.sleep(1)
 
 
+def bake_metadata(args: list[str], plan: dict, path: Path, profile: dict) -> dict:
+    """Reconcile only a known history failure against fresh published outputs.
+
+    A native build is never replayed here. Each invocation publishes unpredictable
+    tags; Registry inspection must verify every active target before adopting its
+    immutable digest. Ordinary solve, authorization and process errors propagate.
+    """
+    path.unlink(missing_ok=True)
+    receipt_path = path.with_name(path.name + ".publication.json")
+    receipt_path.unlink(missing_ok=True)
+    try:
+        execute_bake(args, plan)
+    except subprocess.CalledProcessError as error:
+        tail = error.stderr or b""
+        if isinstance(tail, bytes):
+            tail = tail.decode(errors="replace")
+        terminal = [line for line in tail.splitlines() if line.startswith("ERROR:")]
+        if (
+            error.returncode != 100
+            or not terminal
+            or not re.fullmatch(
+                r"ERROR: .*unknown blob sha256:[0-9a-f]{64} in history", terminal[-1]
+            )
+        ):
+            raise
+        try:
+            outputs = {}
+            tags = set()
+            prefix = profile["registry"] + "/" + profile["prefix"].rstrip("/") + "/"
+            names = plan["group"]["default"]["targets"]
+            if not names:
+                raise ValueError("No native outputs to reconcile")
+            for name in names:
+                tagged = plan["target"][name]["tags"]
+                if len(tagged) != 1 or not tagged[0].startswith(prefix):
+                    raise ValueError("Output is not in this operation's repository")
+                tag = tagged[0].rsplit(":", 1)[-1]
+                if not re.fullmatch(r"build-[0-9a-f]{32}", tag):
+                    raise ValueError("Output lacks a fresh publication tag")
+                tags.add(tag)
+                outputs[name] = tagged[0]
+            if len(tags) != 1:
+                raise ValueError("Outputs belong to different build invocations")
+            recovered = {}
+            for name, tagged in outputs.items():
+                inspection = json.loads(
+                    execute(
+                        [
+                            "docker",
+                            "manifest",
+                            "inspect",
+                            "--verbose",
+                            *(
+                                ["--insecure"]
+                                if profile.get("registry_insecure", False)
+                                else []
+                            ),
+                            tagged,
+                        ],
+                        capture=True,
+                    )
+                )
+                if not isinstance(inspection, dict):
+                    raise TypeError("Expected one native linux/amd64 image manifest")
+                descriptor = inspection["Descriptor"]
+                raw = base64.b64decode(inspection["Raw"], validate=True)
+                manifest = json.loads(raw)
+                digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+                if (
+                    descriptor.get("digest") != digest
+                    or descriptor.get("size") != len(raw)
+                    or descriptor.get("mediaType")
+                    != "application/vnd.oci.image.manifest.v1+json"
+                    or descriptor.get("platform", {}).get("os") != "linux"
+                    or descriptor.get("platform", {}).get("architecture") != "amd64"
+                ):
+                    raise ValueError(
+                        "Registry manifest digest, size or platform mismatch"
+                    )
+                if (
+                    not isinstance(manifest, dict)
+                    or manifest.get("schemaVersion") != 2
+                    or manifest.get("mediaType") != descriptor["mediaType"]
+                    or not isinstance(manifest.get("config"), dict)
+                    or not isinstance(manifest.get("layers"), list)
+                ):
+                    raise ValueError(
+                        "Registry did not return a native OCI image manifest"
+                    )
+                recovered[name] = {
+                    "containerimage.digest": digest,
+                    "akernel.publication-reconciled": True,
+                }
+            receipt_path.write_text(
+                json.dumps(
+                    {
+                        "native_exit_code": error.returncode,
+                        "history_error": terminal[-1],
+                        "outputs": {
+                            name: {"tagged": outputs[name], **data}
+                            for name, data in recovered.items()
+                        },
+                        "verification": "Fresh invocation tags; official Docker Registry inspection; raw manifest SHA256, size and platform verified",
+                        "native_build_replayed": False,
+                    },
+                    indent=2,
+                )
+            )
+            path.write_text(json.dumps(recovered, indent=2))
+        except Exception as verification:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            error.add_note(
+                "Published output verification failed: " + type(verification).__name__
+            )
+            raise error from verification
+        print(
+            "AKernel: native image publication verified after a BuildKit history error; "
+            "using committed immutable artifacts without replaying the build.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return recovered
+    return json.loads(path.read_text())
+
+
 def compose_command(descriptor: dict) -> list[str]:
     command = [
         "docker",
@@ -110,10 +241,13 @@ def build_plan(
     prefix: str,
     no_cache: bool = False,
     registry_insecure: bool = False,
+    publication_tag: str = "built",
 ) -> tuple[dict, dict[str, str]]:
     """Adapt native Bake targets' output only; do not interpret Dockerfiles."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9/_-]*", prefix) or ".." in prefix:
         raise ValueError("Invalid session repository prefix")
+    if not re.fullmatch(r"built|build-[0-9a-f]{32}", publication_tag):
+        raise ValueError("Invalid native publication tag")
     targets = bake.setdefault("target", {})
     references = {}
     for name, service in config["services"].items():
@@ -128,7 +262,15 @@ def build_plan(
                 raise ValueError("Service requires an image or native build target")
             target = {"dockerfile-inline": "FROM " + image + "\n"}
             targets[name] = target
-        reference = registry + "/" + prefix.rstrip("/") + "/" + name.lower() + ":built"
+        reference = (
+            registry
+            + "/"
+            + prefix.rstrip("/")
+            + "/"
+            + name.lower()
+            + ":"
+            + publication_tag
+        )
         references[name] = reference
         target.update(
             {
@@ -162,13 +304,14 @@ def build(descriptor: dict, profile: dict, *, no_cache: bool = False) -> dict:
         profile["prefix"],
         no_cache,
         profile.get("registry_insecure", False),
+        "build-" + uuid.uuid4().hex,
     )
     root = Path(descriptor["directory"] + ".build")
     root.mkdir(mode=0o700, exist_ok=True)
     plan_path = root / "bake.json"
     plan_path.write_text(json.dumps(bake))
     metadata_path = root / "metadata.json"
-    execute_bake(
+    metadata = bake_metadata(
         [
             "docker",
             "buildx",
@@ -184,8 +327,9 @@ def build(descriptor: dict, profile: dict, *, no_cache: bool = False) -> dict:
             "default",
         ],
         bake,
+        metadata_path,
+        profile,
     )
-    metadata = json.loads(metadata_path.read_text())
     references = {}
     for name, tagged in targets.items():
         exported = next(
@@ -290,9 +434,8 @@ def start_builder(profile: dict) -> None:
 def image_build(context: str, profile: dict, *, no_cache: bool = False) -> dict:
     os.environ.setdefault("BUILDX_NO_DEFAULT_ATTESTATIONS", "1")
     start_builder(profile)
-    target = profile["registry"] + "/" + profile["prefix"] + "/single:built"
     metadata = context + ".metadata.json"
-    plan, _ = build_plan(
+    plan, targets = build_plan(
         {},
         {"services": {"single": {"build": {}}}},
         {"target": {"single": {"context": context}}},
@@ -300,10 +443,11 @@ def image_build(context: str, profile: dict, *, no_cache: bool = False) -> dict:
         profile["prefix"],
         no_cache,
         profile.get("registry_insecure", False),
+        "build-" + uuid.uuid4().hex,
     )
     plan_path = context + ".bake.json"
     Path(plan_path).write_text(json.dumps(plan))
-    execute_bake(
+    values = bake_metadata(
         [
             "docker",
             "buildx",
@@ -319,13 +463,14 @@ def image_build(context: str, profile: dict, *, no_cache: bool = False) -> dict:
             "default",
         ],
         plan,
+        Path(metadata),
+        profile,
     )
-    values = json.loads(Path(metadata).read_text())
     exported = plan["group"]["default"]["targets"][0]
     digest = values[exported]["containerimage.digest"]
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise ValueError("BuildKit did not return an immutable artifact")
-    return describe_image(profile, target.rsplit(":", 1)[0] + "@" + digest)
+    return describe_image(profile, targets["single"].rsplit(":", 1)[0] + "@" + digest)
 
 
 def expose_service(container: str, port: int) -> dict:
