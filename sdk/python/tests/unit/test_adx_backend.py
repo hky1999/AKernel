@@ -31,7 +31,7 @@ from adx_environment.commands import Commands as NativeCommands
 from akernel_sdk._addresses import Endpoint
 from akernel_sdk._backends import adx
 from akernel_sdk._backends.base import BackendConfig, SandboxSpec
-from akernel_sdk._backends.errors import BackendOperationError
+from akernel_sdk._backends.errors import BackendOperationError, TimeoutException
 from akernel_sdk.types import HttpReverseTunnel, Mount, NetworkPolicy, S3Config
 
 
@@ -714,6 +714,51 @@ class AdxBackendTest(unittest.TestCase):
             stdout="finished", stderr="", exit_code=0
         )
         self.assertEqual(driver.wait(12, timeout=10).exit_code, 0)
+
+    def test_foreground_timeout_retains_partial_output_without_using_it_as_reason(self):
+        native = MagicMock()
+        native.run.return_value = SimpleNamespace(
+            stdout="partial stdout",
+            stderr="ordinary build progress, no diagnostic",
+            exit_code=None,
+            status=adx.adx_environment.CommandStatus.TIMED_OUT,
+            error_code="COMMAND_TIMEOUT",
+            error_message=None,
+        )
+        driver = adx._CommandsDriver(native)
+        with self.assertRaisesRegex(
+            TimeoutException, "timed out after 600 seconds"
+        ) as caught:
+            driver.run("native build", envs=None, cwd=None, timeout=600)
+        error = caught.exception
+        self.assertEqual(error.code, "COMMAND_TIMEOUT")
+        self.assertIsNone(error.retry)
+        self.assertIsNone(error.outcome)
+        self.assertNotIn("ordinary build progress", str(error))
+        self.assertIsNotNone(error.command_result)
+        self.assertEqual(error.command_result.stdout, "partial stdout")
+        self.assertEqual(
+            error.command_result.stderr, "ordinary build progress, no diagnostic"
+        )
+        self.assertIsNone(error.command_result.exit_code)
+
+    def test_foreground_wait_timeout_is_not_reported_as_a_terminal_exit(self):
+        native = MagicMock()
+        native.run.return_value = SimpleNamespace(
+            stdout="partial",
+            stderr="progress",
+            exit_code=None,
+            status=adx.adx_environment.CommandStatus.RUNNING,
+            error_code="WAIT_TIMEOUT",
+            error_message="observation expired",
+        )
+        driver = adx._CommandsDriver(native)
+        with self.assertRaises(TimeoutException) as caught:
+            driver.run("native build", envs=None, cwd=None, timeout=600)
+        self.assertEqual(caught.exception.code, "WAIT_TIMEOUT")
+        self.assertIsNone(caught.exception.outcome)
+        self.assertIsNotNone(caught.exception.command_result)
+        self.assertEqual(caught.exception.command_result.status, "RUNNING")
 
     def test_reload_waits_for_new_data_route_without_repeating_reload(self):
         backend = adx.AdxBackend(self.config)

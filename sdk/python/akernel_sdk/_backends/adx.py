@@ -315,6 +315,7 @@ def _convert_error(operation: str, error: Exception) -> BackendOperationError:
         cleanup_errors=getattr(error, "cleanup_errors", ()) or (),
         command_id=getattr(error, "command_id", None),
         first_error=getattr(error, "first_error", None),
+        command_result=getattr(error, "command_result", None),
     )
 
 
@@ -356,9 +357,13 @@ def _command_timeout_message(value: Any, timeout: int) -> str | None:
         )
     ):
         return None
-    return str(getattr(value, "error_message", None) or stderr).strip() or (
-        f"Command timed out after {timeout} seconds"
+    message = str(getattr(value, "error_message", None) or "").strip()
+    label = (
+        f"Command wait timed out after {timeout} seconds"
+        if error_code == "WAIT_TIMEOUT"
+        else f"Command timed out after {timeout} seconds"
     )
+    return label + (": " + message if message else "")
 
 
 def _command_info(value: Any) -> CommandInfo:
@@ -443,8 +448,12 @@ class _CommandsDriver:
                 timeout=timeout,
             )
             if timeout_message := _command_timeout_message(value, timeout):
-                raise BackendOperationError(
-                    f"command execution failed: {timeout_message}"
+                raise TimeoutException(
+                    timeout_message,
+                    code=getattr(value, "error_code", None) or "COMMAND_TIMEOUT",
+                    retry=getattr(value, "retry", None),
+                    outcome=getattr(value, "outcome", None),
+                    command_result=_command_result(value),
                 )
             result = _command_result(value)
         except Exception as error:

@@ -491,6 +491,13 @@ observation. The default continues returning `CommandResult`. Authentication,
 permission, missing-resource, timeout, rate-limit and service-busy exceptions
 subclass `BackendOperationError` and retain structured service context.
 
+An ADX foreground command deadline raises `TimeoutException` with its native
+error code and any available partial `command_result`. Its message identifies
+the deadline; stdout/stderr remain command output. A wait deadline does not
+establish a terminal remote exit. Managed builds and Compose operations retain
+available partial output in their configured logs, preserving the original
+exception if local log persistence fails.
+
 Foreground commands return a backend-neutral `CommandResult`. Background
 commands return an AKernel `CommandHandle`; its lifecycle operations are
 delegated to the selected backend.

@@ -963,6 +963,12 @@ successful advisory views to one second. Do not cache failures or share views
 across backend credentials; discard inherited process state before locking.
 This does not limit concurrent creates or replace fresh server authorization.
 
+Foreground command deadlines raise TimeoutException with an explicit timeout
+label and available partial command_result. Preserve its native error code and
+retry/outcome guidance; application stderr is output, not the timeout reason.
+Build/Compose logs retain that partial output without replaying commands or
+replacing the primary error when local log persistence fails.
+
 Publish native builds under fresh invocation tags. Reconcile only the known
 post-publication Buildx history error, using official Docker inspection and
 verified immutable manifests for every planned output. Preserve the original

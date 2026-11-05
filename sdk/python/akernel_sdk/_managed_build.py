@@ -153,6 +153,23 @@ def build_image(
         )
     except BaseException as error:
         failure = error
+        if (
+            isinstance(error, BackendOperationError)
+            and error.command_result is not None
+            and log_path is not None
+        ):
+            try:
+                target = Path(log_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                partial = error.command_result
+                target.write_text(partial.stdout + partial.stderr)
+            except OSError as logging_error:
+                add_note = getattr(error, "add_note", None)
+                if callable(add_note):
+                    add_note(
+                        "Could not preserve partial build log: "
+                        + type(logging_error).__name__
+                    )
         raise
     finally:
         try:

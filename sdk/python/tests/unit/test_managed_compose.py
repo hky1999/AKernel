@@ -6,11 +6,51 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from akernel_sdk import ComposeProject, DockerRuntime, HttpReverseTunnel
+from akernel_sdk import (
+    ComposeProject,
+    DockerRuntime,
+    HttpReverseTunnel,
+    TimeoutException,
+)
 from akernel_sdk.types import CommandResult
 
 
 class ManagedCompose(unittest.TestCase):
+    def test_managed_build_timeout_preserves_output_without_replaying_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "context"
+            source.mkdir()
+            definition = source / "docker-compose.yaml"
+            definition.write_text("services: {main: {build: .}}")
+            project = ComposeProject.prepare(
+                source,
+                [definition],
+                runtime=DockerRuntime(profile="harbor-v1"),
+                output_dir=root / "output",
+            )
+            sandbox = MagicMock()
+            sandbox.commands.run.return_value = CommandResult('["main"]', "", 0)
+            with (
+                patch.object(DockerRuntime, "start"),
+                patch("akernel_sdk._managed_build.upload_context"),
+            ):
+                project.start_runtime(sandbox)
+            failure = TimeoutException(
+                "execution deadline",
+                code="COMMAND_TIMEOUT",
+                command_result=CommandResult("partial output", "partial error", None),
+            )
+            sandbox.commands.run.reset_mock()
+            sandbox.commands.run.side_effect = failure
+            with self.assertRaises(TimeoutException) as caught:
+                project.build()
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(
+                (root / "output/build.log").read_text(), "partial outputpartial error"
+            )
+            sandbox.commands.run.assert_called_once()
+
     def test_managed_project_delegates_build_and_register_and_restores_handles(self):
         with tempfile.TemporaryDirectory() as temporary:
             context = Path(temporary) / "context"
