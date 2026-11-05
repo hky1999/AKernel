@@ -5,20 +5,20 @@
   "upstream_baselines": {
     "akernel": {
       "branch": "develop",
-      "commit": "c7a3998e4ad1b45c89048ce8cb8c57fcdbe7e38f"
+      "commit": "b42a6912daa061c7b2c8438c368236e76d5c2a53"
     },
     "sandboxd": {
       "branch": "main",
-      "commit": "fbe69e566859718414a207fa780b8dab363b9381"
+      "commit": "8d889329ae5ad7dd731f0e41cd604ab8182e7300"
     },
     "agent_dx": {
       "branch": "master",
-      "commit": "ec4d2108187ed819575340c492c7657840af8024"
+      "commit": "e87a3a4cb448259b6a6138e2761ddec50786a711"
     }
   },
   "candidate_gitlinks": {
-    "sandboxd": "8760ca581852940d58241f6255d8c35867da781e",
-    "agent_dx": "824850f494447384b9c06ccb1a709003c0315fb0"
+    "sandboxd": "8d889329ae5ad7dd731f0e41cd604ab8182e7300",
+    "agent_dx": "09478c9e23aee1e59360492230a56200c9f3252e"
   },
   "pinned_runtime_artifacts": {
     "gvisor": {
@@ -31,10 +31,18 @@
     }
   },
   "qualified_client_override": {
-    "native_adx_sdk": "00243e8b9e461182b99a5a6c5ddad51231cad94f",
+    "native_adx_sdk": "e87a3a4cb448259b6a6138e2761ddec50786a711",
     "note": "The maintained Harbor lock pins its native client independently of the runtime package SDK wheel."
   },
   "afs_enabled": false,
   "envd_enabled": false,
-  "publication_requirement": "Build and verify matching platform and Execd archives from the pinned candidate source, and record both archive checksums in the framework build. Before formal release, publish reviewed component artifacts through CI and align source pins and default download URL/checksum pairs. Candidate build overrides are not formal releases."
+  "publication_requirement": "Build and verify matching platform and Execd archives from the pinned candidate source, and record both archive checksums in the framework build. Before formal release, publish reviewed component artifacts through CI and align source pins and default download URL/checksum pairs. Candidate build overrides are not formal releases.",
+  "candidate_patch": {
+    "agent_dx": {
+      "source_commit": "3432d411b60eddc0eb33899c4f191b0cdf745e5f",
+      "rebased_commit": "09478c9e23aee1e59360492230a56200c9f3252e",
+      "reason": "Latest master still truncates catalog publication at the generic RPC timeout; preserve the separately qualified remaining-budget repair.",
+      "pull_request": "https://github.com/openJiuwen-ai/agent-dx/pull/212"
+    }
+  }
 }
