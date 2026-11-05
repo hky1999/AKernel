@@ -1681,6 +1681,10 @@ handles. It does not interpret Dockerfiles or start a local Docker daemon.
 `no_cache=True` is an explicit rebuild choice; fresh environments retain native
 BuildKit cache use by default. Build failure stdout/stderr can be retained using
 `build_image(..., log_path=...)`. Cleanup failures retain environment identity.
+`artifact.has_startup_command` reports whether the effective OCI ENTRYPOINT/CMD
+is nonempty. Pass it as `Sandbox(..., inherit_entrypoint=artifact.has_startup_command)`
+when the task should run the image's startup command. Images that clear both
+commands still support interactive sandbox creation with inheritance disabled.
 Optional `cpu_request` (millicores) and `memory_request` (MiB) change only the
 temporary preparation sandbox's scheduling reservation. Its existing limits
 remain 1000 millicores and 2048 MiB; each request must be positive and no greater
@@ -1690,8 +1694,13 @@ Restore uses `ComposeProject.attach()` and saved descriptors; it never rebuilds
 or reruns Docker startup. Snapshot metadata contains an opaque server-created
 collection identity, checked against the tenant and profile on restore.
 
-This opt-in preview requires same-node retained collections. Their references
-remain pinned until the managed service is drained. Cross-node/restart recovery,
-durable per-snapshot leases and automatic artifact GC are not yet supported.
+This opt-in preview requires same-node retained collections and the same mount
+view. Version-1 collections use durable local live/checkpoint leases and are
+retired after their last reference disappears; retained checkpoints keep their
+ROFS mounts pinned. Service restart recovers these leases before admission.
+Legacy collections require an operator drain. This local mount cleanup does not
+delete Registry artifacts. Cross-node reconstruction, Pod replacement with a
+changed provider identity, and automatic Registry artifact GC remain outside
+the qualified contract.
 The isolated HTTP Registry account is not a multi-tenant scoped Registry token;
 operators must qualify TLS and repository-scoped credentials before wider use.

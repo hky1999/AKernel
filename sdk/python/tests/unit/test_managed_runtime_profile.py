@@ -86,6 +86,7 @@ class ManagedProfileContract(unittest.TestCase):
                     "Env": ["MODE=native"],
                     "WorkingDir": "/app",
                     "User": "1000",
+                    "Cmd": ["/bin/bash"],
                 },
             }
 
@@ -109,7 +110,43 @@ class ManagedProfileContract(unittest.TestCase):
             self.assertNotIn("image", factory.call_args.kwargs)
             self.assertEqual(result.envs, {"MODE": "native"})
             self.assertEqual(result.cwd, "/app")
+            self.assertTrue(result.has_startup_command)
             sandbox.kill.assert_called_once()
+
+    def test_effective_empty_and_nonempty_image_startup(self):
+        for process, expected in [
+            ({}, False),
+            ({"Entrypoint": [], "Cmd": None}, False),
+            ({"Entrypoint": None, "Cmd": []}, False),
+            ({"Entrypoint": ["/server"], "Cmd": []}, True),
+            ({"Entrypoint": [], "Cmd": ["/bin/bash"]}, True),
+        ]:
+            with (
+                self.subTest(process=process),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                (root / "Dockerfile").write_text("FROM scratch\nENTRYPOINT []\n")
+                sandbox = MagicMock()
+                handle = {
+                    "reference": "private.test/task@sha256:" + "a" * 64,
+                    "image_process": process,
+                }
+
+                def execute(command, _handle=handle, **_kwargs):
+                    return CommandResult(
+                        stdout=json.dumps(_handle)
+                        if command == "cat /work/artifact.json"
+                        else "",
+                        stderr="",
+                        exit_code=0,
+                    )
+
+                sandbox.commands.run.side_effect = execute
+                with patch("akernel_sdk.sandbox.Sandbox", return_value=sandbox):
+                    result = build_image(root, profile="harbor-v1")
+                self.assertIs(result.has_startup_command, expected)
+                sandbox.kill.assert_called_once()
 
     def test_failed_build_retains_primary_error_and_cleanup_identity(self):
         with tempfile.TemporaryDirectory() as directory:

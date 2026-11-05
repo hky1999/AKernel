@@ -19,12 +19,18 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class BuiltImage:
-    """Immutable image and public process defaults returned by the runtime."""
+    """Immutable image and public process defaults returned by the runtime.
+
+    ``has_startup_command`` indicates whether its effective OCI ENTRYPOINT/CMD
+    is nonempty. An image with neither can still host an interactive sandbox;
+    leave ``Sandbox.inherit_entrypoint`` disabled for that image.
+    """
 
     reference: str
     envs: dict[str, str]
     cwd: str | None = None
     user: str | None = None
+    has_startup_command: bool = True
 
 
 def upload_context(sandbox: Sandbox, source: Path, destination: str) -> None:
@@ -143,6 +149,7 @@ def build_image(
             ),
             cwd=process.get("WorkingDir") or None,
             user=process.get("User") or None,
+            has_startup_command=bool(process.get("Entrypoint") or process.get("Cmd")),
         )
     except BaseException as error:
         failure = error
