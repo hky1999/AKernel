@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import hmac
 import json
 import logging
+import os
+import stat
+import time
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from contextlib import contextmanager
+from weakref import WeakValueDictionary
 
 from image_provider import ImageProvider
 
@@ -20,10 +26,10 @@ class RuntimeCollections:
     def __init__(self, root: Path, image_socket: str):
         self.root = root
         self.image_socket = image_socket
-        self.providers: dict[str, ImageProvider] = {}
+        self.providers: WeakValueDictionary[str, ImageProvider] = WeakValueDictionary()
         self.lock = threading.Lock()
 
-    def authorize(self, authorization: str) -> ImageProvider:
+    def _record(self, authorization: str) -> dict:
         if not authorization.startswith("Bearer "):
             raise PermissionError("Runtime capability required")
         token = authorization.removeprefix("Bearer ")
@@ -43,26 +49,89 @@ class RuntimeCollections:
             raise PermissionError("Invalid runtime capability")
         if record["collection_id"] != collection:
             raise PermissionError("Runtime collection identity mismatch")
+        if record.get("lifecycle_version", 0) not in {0, 1}:
+            raise PermissionError("Unsupported runtime collection lifecycle")
+        return record
+
+    def authorize(self, authorization: str) -> ImageProvider:
+        record = self._record(authorization)
+        collection = record["collection_id"]
         with self.lock:
-            if collection not in self.providers:
-                self.providers[collection] = ImageProvider(
+            provider = self.providers.get(collection)
+            if provider is None:
+                provider = ImageProvider(
                     self.root / "collections" / collection,
                     record["registry"],
                     image_socket=self.image_socket,
                     repository_prefix=record["repository_prefix"],
                     scheme=record["scheme"],
+                    owner=collection,
                 )
-            return self.providers[collection]
+                self.providers[collection] = provider
+            return provider
+
+    @contextmanager
+    def _lease(self, record: dict):
+        if record.get("lifecycle_version", 0) == 0:
+            # Old preview collections stay pinned until an operator drain.
+            yield
+            return
+        identity = record["collection_id"]
+        path = self.root / "leases" / identity
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        except FileNotFoundError as error:
+            raise PermissionError("Runtime collection unavailable") from error
+        try:
+            deadline = time.monotonic() + 180
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "Runtime collection operation wait timed out"
+                        )
+                    time.sleep(0.01)
+            try:
+                current = path.lstat()
+            except FileNotFoundError as error:
+                raise PermissionError("Runtime collection unavailable") from error
+            opened = os.fstat(fd)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+                or opened.st_nlink <= 1
+                or (self.root / "retired" / identity).exists()
+            ):
+                raise PermissionError("Runtime collection retired or unowned")
+            yield
+        finally:
+            os.close(fd)
+
+    def perform(self, authorization: str, operation: str, reference: str) -> dict:
+        record = self._record(authorization)
+        with self._lease(record):
+            # Revalidate after waiting: retirement may have revoked the record.
+            provider = self.authorize(authorization)
+            function = (
+                provider.prepare
+                if operation == "/prepare"
+                else provider.describe_artifact
+            )
+            return function(reference)
 
 
 def serve(collections: RuntimeCollections, port: int) -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
-            if self.path != "/prepare":
+            if self.path not in {"/prepare", "/describe"}:
                 self.send_error(404)
                 return
             try:
-                provider = collections.authorize(self.headers.get("Authorization", ""))
+                authorization = self.headers.get("Authorization", "")
+                collections._record(authorization)
             except PermissionError:
                 self.send_error(401)
                 return
@@ -74,8 +143,13 @@ def serve(collections: RuntimeCollections, port: int) -> None:
                 body = json.loads(self.rfile.read(size))
                 if set(body) != {"reference"} or not isinstance(body["reference"], str):
                     raise ValueError("Immutable artifact reference required")
-                result = provider.prepare(body["reference"])
+                result = collections.perform(
+                    authorization, self.path, body["reference"]
+                )
                 payload = json.dumps(result).encode()
+            except PermissionError:
+                self.send_error(401, "Runtime collection unavailable")
+                return
             except ValueError as error:
                 self.send_error(400, str(error))
                 return

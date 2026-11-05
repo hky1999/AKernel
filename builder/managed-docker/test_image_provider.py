@@ -65,6 +65,44 @@ class ImageProviderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.provider.prepare("registry.test/poc/main:latest")
 
+    def test_single_image_artifact_reads_config_without_mount_or_registration(self):
+        config = {
+            "os": "linux",
+            "architecture": "amd64",
+            "rootfs": {"diff_ids": [provider.digest(b"root")]},
+            "config": {"Env": ["MODE=native"], "WorkingDir": "/app", "User": "1000"},
+        }
+        payload = json.dumps(config).encode()
+        config_desc = {"digest": provider.digest(payload), "size": len(payload)}
+        manifest = {
+            "config": config_desc,
+            "layers": [{"mediaType": "application/vnd.oci.image.layer.nydus.blob.v1"}],
+        }
+        reference = "registry.test/poc/main@" + provider.digest(
+            json.dumps(manifest).encode()
+        )
+
+        def fetch(_repository, kind, selected, descriptor=None):
+            if kind == "manifests":
+                return manifest, {"descriptor": {"digest": selected}}
+            self.assertEqual(descriptor, config_desc)
+            name = selected.replace(":", "-") + ".json"
+            (self.provider.metadata / name).write_bytes(payload)
+            return config, {"descriptor": config_desc, "file": name}
+
+        with (
+            patch.object(self.provider, "fetch", side_effect=fetch),
+            patch.object(self.provider, "mount_image") as mount,
+            patch.object(provider.subprocess, "run") as run,
+        ):
+            actual = self.provider.describe_artifact(reference)
+        self.assertEqual(
+            actual, {"reference": reference, "image_process": config["config"]}
+        )
+        mount.assert_not_called()
+        run.assert_not_called()
+        self.assertEqual(json.loads(self.provider.plan.read_text())["images"], [])
+
     def test_digest_chain_matches_oci_definition(self):
         first, second = provider.digest(b"one"), provider.digest(b"two")
         self.assertEqual(provider.chain_id([first]), first)

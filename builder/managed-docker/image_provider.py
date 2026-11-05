@@ -66,6 +66,7 @@ class ImageProvider:
         image_socket: str = "/run/sandboxd/image-api/image.sock",
         repository_prefix: str = "poc/",
         scheme: str = "https",
+        owner: str | None = None,
     ):
         if scheme not in {"https", "http"}:
             raise ValueError("Registry scheme must be http or https")
@@ -74,6 +75,7 @@ class ImageProvider:
         self.scheme = scheme
         self.image_socket = image_socket
         self.repository_prefix = repository_prefix
+        self.owner = owner
         self.lock = threading.Lock()
         self.metadata = root / ".metadata"
         self.metadata.mkdir(mode=0o755, parents=True, exist_ok=True)
@@ -195,7 +197,12 @@ class ImageProvider:
             connection.request(
                 "POST",
                 "/oci_mount",
-                body=json.dumps({"image_url": reference}),
+                body=json.dumps(
+                    {
+                        "image_url": reference,
+                        **({"owner": self.owner} if self.owner else {}),
+                    }
+                ),
                 headers={"Content-Type": "application/json"},
             )
             response = connection.getresponse()
@@ -236,12 +243,29 @@ class ImageProvider:
             "plan": "/opt/akernel-images/.metadata/plan.json",
             "reused": reused,
         }
+        result.update(self.process_defaults(image))
+        return result
+
+    def process_defaults(self, image: dict) -> dict:
         config = image.get("config", {}).get("digest")
         if config:
-            result["image_process"] = json.loads(
-                (self.metadata / (config.replace(":", "-") + ".json")).read_text()
-            ).get("config", {})
-        return result
+            return {
+                "image_process": json.loads(
+                    (self.metadata / (config.replace(":", "-") + ".json")).read_text()
+                ).get("config", {})
+            }
+        return {}
+
+    def describe_artifact(self, reference: str) -> dict:
+        """Return verified build metadata without acquiring a ROFS mount.
+
+        A single-container build helper does not run the task image. Its
+        consumer acquires the final rootfs through Sandboxd's ordinary image
+        lifecycle; registering that root here would retain an unused daemon.
+        """
+        with self.lock:
+            image = self.describe(reference)
+            return {"reference": reference, **self.process_defaults(image)}
 
     def prepare(self, reference: str) -> dict:
         self.validate_reference(reference)
@@ -292,7 +316,7 @@ def serve(provider: ImageProvider, token_file: Path, address: tuple[str, int]) -
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
-            if self.path != "/prepare":
+            if self.path not in {"/prepare", "/describe"}:
                 self.send_error(404)
                 return
             if not hmac.compare_digest(
@@ -307,7 +331,12 @@ def serve(provider: ImageProvider, token_file: Path, address: tuple[str, int]) -
                 body = json.loads(self.rfile.read(size))
                 if set(body) != {"reference"} or not isinstance(body["reference"], str):
                     raise ValueError("Only an immutable artifact reference is accepted")
-                value = provider.prepare(body["reference"])
+                operation = (
+                    provider.prepare
+                    if self.path == "/prepare"
+                    else provider.describe_artifact
+                )
+                value = operation(body["reference"])
             except ValueError as error:
                 self.reply(400, {"error": str(error), "phase": "validate_artifact"})
                 return

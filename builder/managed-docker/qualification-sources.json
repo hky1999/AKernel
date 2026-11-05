@@ -9,7 +9,7 @@
     },
     "sandboxd": {
       "branch": "main",
-      "commit": "8d889329ae5ad7dd731f0e41cd604ab8182e7300"
+      "commit": "65eda5fc0dd014f600a6bbdade8cd936fe18c252"
     },
     "agent_dx": {
       "branch": "master",
@@ -17,7 +17,7 @@
     }
   },
   "candidate_gitlinks": {
-    "sandboxd": "8d889329ae5ad7dd731f0e41cd604ab8182e7300",
+    "sandboxd": "ee2965cc12eeed871da6ce84a61aa01f587d72c4",
     "agent_dx": "d8d8fea64bf45ad745cb7fc264f58ab42cb7dc6d"
   },
   "pinned_runtime_artifacts": {
@@ -48,6 +48,11 @@
         "dbc5a44e5e7acc4d8435b3a44cb766bf50096ea3",
         "d8d8fea64bf45ad745cb7fc264f58ab42cb7dc6d"
       ]
+    },
+    "sandboxd": {
+      "source_commit": "ee2965cc12eeed871da6ce84a61aa01f587d72c4",
+      "pull_request": "https://github.com/inclusionAI/sandboxd/pull/101",
+      "reason": "Collection-scoped image ownership and durable node-local live/checkpoint leases; remove service-lifetime unused ROFS retention. Local gates passed; cluster qualification recorded separately."
     }
   }
 }

@@ -249,10 +249,10 @@ def prepare(descriptor: dict, profile: dict) -> dict:
     return {"artifacts": references, "prepared": prepared, "descriptor": attached}
 
 
-def prepare_image(profile: dict, reference: str) -> dict:
+def image_request(profile: dict, reference: str, operation: str) -> dict:
     token = Path(profile["token_file"]).read_text().strip()
     request = Request(
-        profile["provider"] + "/prepare",
+        profile["provider"] + operation,
         data=json.dumps({"reference": reference}).encode(),
         headers={
             "Authorization": "Bearer " + token,
@@ -261,6 +261,14 @@ def prepare_image(profile: dict, reference: str) -> dict:
     )
     with build_opener(ProxyHandler({})).open(request, timeout=180) as response:
         return json.loads(response.read(1024 * 1024))
+
+
+def prepare_image(profile: dict, reference: str) -> dict:
+    return image_request(profile, reference, "/prepare")
+
+
+def describe_image(profile: dict, reference: str) -> dict:
+    return image_request(profile, reference, "/describe")
 
 
 def start_builder(profile: dict) -> None:
@@ -317,7 +325,7 @@ def image_build(context: str, profile: dict, *, no_cache: bool = False) -> dict:
     digest = values[exported]["containerimage.digest"]
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise ValueError("BuildKit did not return an immutable artifact")
-    return prepare_image(profile, target.rsplit(":", 1)[0] + "@" + digest)
+    return describe_image(profile, target.rsplit(":", 1)[0] + "@" + digest)
 
 
 def expose_service(container: str, port: int) -> dict:
