@@ -961,6 +961,10 @@ The legacy source-preview SDK owns Compose image discovery/OCI metadata validati
 
 Managed builds export native targets without adding a Python helper layer or changing task PATH. Whole-sandbox C/R is independent of guest interpreters and application quiescence. `ServiceHandle.start_command()` runs native Compose exec as a reconnectable sandbox command, with an outer Docker CLI PID and stable command ID; restore reattaches without replay or signals. Keep the explicit Python-based inner `start_process()` API optional.
 
+`BuiltImage.has_startup_command` reflects the effective OCI ENTRYPOINT/CMD
+returned by the runtime. Consumers that inherit image startup must disable
+inheritance for empty commands; such images remain valid interactive roots.
+
 Compose project lifecycle and Docker service/process operations are SDK extensions in `_compose.py` and `_service_process.py`; the dependency-free `_service_process_guest.py` runs in the selected service PID namespace. Keep project descriptors JSON-compatible and restore attachment free of fresh-boot operations. Preserve explicit build/network-policy/up boundaries, unknown-outcome identities, source fencing, and container/process start-time checks before signals. Callers retain task/harness semantics. Run the real-process helper unit tests with owned-process cleanup and the complete SDK quality gate when changing these contracts. This feature does not add Docker semantics to Agent DX or change runtime pins.
 
 Automatic Compose image preparation covers image-only services as well as Dockerfile bases. Verify pinned Docker references and committed ROFS snapshots instead of running native pulls, including during up. Keep digest-reference regression coverage and fail closed on missing registrations; never relax bridge extraction protection or populate the private upper with replacement lower layers.
