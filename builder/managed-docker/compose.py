@@ -78,12 +78,13 @@ def execute_bake(args: list[str], plan: dict) -> None:
 
 
 def bake_metadata(args: list[str], plan: dict, path: Path, profile: dict) -> dict:
-    """Reconcile only a known history failure against fresh published outputs.
+    """Reconcile narrowly identified result errors against published outputs.
 
     A native build is never replayed here. Each invocation publishes unpredictable
     tags; Registry inspection must verify every active target before adopting its
     immutable digest. Ordinary solve, authorization and process errors propagate.
     """
+    os.environ.setdefault("BUILDX_METADATA_PROVENANCE", "disabled")
     path.unlink(missing_ok=True)
     receipt_path = path.with_name(path.name + ".publication.json")
     receipt_path.unlink(missing_ok=True)
@@ -94,13 +95,13 @@ def bake_metadata(args: list[str], plan: dict, path: Path, profile: dict) -> dic
         if isinstance(tail, bytes):
             tail = tail.decode(errors="replace")
         terminal = [line for line in tail.splitlines() if line.startswith("ERROR:")]
-        if (
-            error.returncode != 100
-            or not terminal
-            or not re.fullmatch(
-                r"ERROR: .*unknown blob sha256:[0-9a-f]{64} in history", terminal[-1]
-            )
-        ):
+        history_failure = bool(terminal) and re.fullmatch(
+            r"ERROR: .*unknown blob sha256:[0-9a-f]{64} in history", terminal[-1]
+        )
+        publication_deadline = bool(terminal) and terminal[-1] == (
+            "ERROR: failed to solve: Internal: context deadline exceeded"
+        )
+        if error.returncode != 100 or not (history_failure or publication_deadline):
             raise
         try:
             outputs = {}
@@ -120,6 +121,26 @@ def bake_metadata(args: list[str], plan: dict, path: Path, profile: dict) -> dic
                 outputs[name] = tagged[0]
             if len(tags) != 1:
                 raise ValueError("Outputs belong to different build invocations")
+            acknowledged = {}
+            if publication_deadline:
+                for name, tagged in outputs.items():
+                    if plan["target"][name].get("attest"):
+                        raise ValueError(
+                            "Explicit attestations require native completion"
+                        )
+                    digests = set(
+                        re.findall(
+                            r"(?m)^#\d+ pushing manifest for "
+                            + re.escape(tagged)
+                            + r"@(sha256:[0-9a-f]{64})[^\r\n]* done\r?$",
+                            tail,
+                        )
+                    )
+                    if len(digests) != 1:
+                        raise ValueError(
+                            "No complete native manifest push acknowledgement"
+                        )
+                    acknowledged[name] = digests.pop()
             recovered = {}
             for name, tagged in outputs.items():
                 inspection = json.loads(
@@ -145,6 +166,10 @@ def bake_metadata(args: list[str], plan: dict, path: Path, profile: dict) -> dic
                 raw = base64.b64decode(inspection["Raw"], validate=True)
                 manifest = json.loads(raw)
                 digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+                if name in acknowledged and acknowledged[name] != digest:
+                    raise ValueError(
+                        "Registry digest differs from the native push acknowledgement"
+                    )
                 if (
                     descriptor.get("digest") != digest
                     or descriptor.get("size") != len(raw)
@@ -174,7 +199,11 @@ def bake_metadata(args: list[str], plan: dict, path: Path, profile: dict) -> dic
                 json.dumps(
                     {
                         "native_exit_code": error.returncode,
-                        "history_error": terminal[-1],
+                        "native_error": terminal[-1],
+                        **({"history_error": terminal[-1]} if history_failure else {}),
+                        "failure_kind": "history-result"
+                        if history_failure
+                        else "acknowledged-publication-deadline",
                         "outputs": {
                             name: {"tagged": outputs[name], **data}
                             for name, data in recovered.items()
@@ -196,7 +225,7 @@ def bake_metadata(args: list[str], plan: dict, path: Path, profile: dict) -> dic
             )
             raise error from verification
         print(
-            "AKernel: native image publication verified after a BuildKit history error; "
+            "AKernel: native image publication verified after a native result error; "
             "using committed immutable artifacts without replaying the build.",
             file=sys.stderr,
             flush=True,

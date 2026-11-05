@@ -36,7 +36,13 @@ If Buildx exits with the specific post-publication `unknown blob ... in history`
 error, the runtime inspects every planned output with the official Docker CLI
 and verifies its raw manifest digest, size and platform. It adopts the published
 outputs only after all checks pass, records the original error in a publication
-receipt, and does not replay the build. Missing or partial publication, ordinary
+receipt, and does not replay the build. A separate exact internal-deadline case
+requires completed native manifest-push acknowledgements for every target and
+matching Registry digests; explicit attestations are ineligible for this recovery.
+Buildx exit 100 alone does not establish publication. Metadata-file provenance
+defaults to Docker's supported `disabled` mode; an explicit operator setting is
+preserved. This skips the optional client history lookup, without claiming to
+repair server-side history or storage failures. Missing or partial publication, ordinary
 build errors, authentication failures and unknown command outcomes still fail.
 
 Managed builds export the original native Docker/Buildx targets directly. They do not append an application interpreter, synthetic harness layer or PATH entries. Whole-sandbox checkpoint/restore is performed externally by Sandboxd/runsc and requires no Python or process-tree stop/continue in task images. Runtime control tools may use Python in the platform's own tools image; this is separate from application image requirements.
