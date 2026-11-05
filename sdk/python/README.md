@@ -1690,6 +1690,10 @@ temporary preparation sandbox's scheduling reservation. Its existing limits
 remain 1000 millicores and 2048 MiB; each request must be positive and no greater
 than its limit. Omit these options to preserve the default reservations. Lower
 requests do not provide additional physical capacity for concurrent workloads.
+The managed resource-geometry probe coalesces concurrent reads within one
+authenticated SDK backend and reuses successful views for at most one second.
+Errors are not cached. Creation still reaches the scheduler individually, and
+node authorization and storage validation remain authoritative on every request.
 Restore uses `ComposeProject.attach()` and saved descriptors; it never rebuilds
 or reruns Docker startup. Snapshot metadata contains an opaque server-created
 collection identity, checked against the tenant and profile on restore.

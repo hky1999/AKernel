@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import concurrent.futures
 import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -176,6 +179,132 @@ class AdxBackendTest(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "PERMISSION_DENIED")
         self.assertEqual(raised.exception.request_id, "profile-test")
+
+    def test_concurrent_managed_creates_share_geometry_without_merging_specs(self):
+        backend = adx.AdxBackend(self.config)
+        barrier = threading.Barrier(16)
+        calls = []
+        key = "AKERNEL_RUNTIME_PROFILE_harbor-v1"
+
+        def send(_client, request, **_kwargs):
+            calls.append(request)
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": "a", "status": 0, "labels": {key: "8192"}},
+                        {"id": "b", "status": 0, "labels": {key: "12288"}},
+                    ]
+                },
+                request=request,
+            )
+
+        def resolve(index):
+            barrier.wait(timeout=5)
+            return backend._managed_storage(
+                _spec(
+                    extra_config={"managedRuntimeProfile": "harbor-v1"},
+                    node_id="a" if index % 2 == 0 else "b",
+                )
+            )[0].storage_mb
+
+        with patch.object(httpx.Client, "send", autospec=True, side_effect=send):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+                result = list(pool.map(resolve, range(16)))
+        self.assertEqual(result, [8192, 12288] * 8)
+        self.assertEqual(len(calls), 1)
+
+    def test_managed_probe_expires_and_does_not_serve_stale_authorization(self):
+        backend = adx.AdxBackend(self.config)
+        spec = _spec(extra_config={"managedRuntimeProfile": "harbor-v1"})
+        key = "AKERNEL_RUNTIME_PROFILE_harbor-v1"
+        clock = [0.0]
+        replies = [8192, None, 16384]
+
+        def send(_client, request, **_kwargs):
+            floor = replies.pop(0)
+            if floor is None:
+                return httpx.Response(403, json={"message": "revoked"}, request=request)
+            return httpx.Response(
+                200,
+                json={"items": [{"id": "a", "status": 0, "labels": {key: str(floor)}}]},
+                request=request,
+            )
+
+        with (
+            patch.object(httpx.Client, "send", autospec=True, side_effect=send),
+            patch.object(adx.time, "monotonic", side_effect=lambda: clock[0]),
+        ):
+            self.assertEqual(backend._managed_storage(spec)[0].storage_mb, 8192)
+            clock[0] = 0.5
+            self.assertEqual(backend._managed_storage(spec)[0].storage_mb, 8192)
+            clock[0] = 1.0
+            with self.assertRaises(BackendOperationError):
+                backend._managed_storage(spec)
+            self.assertEqual(backend._managed_storage(spec)[0].storage_mb, 16384)
+        self.assertEqual(replies, [])
+
+    def test_managed_probe_isolated_by_authenticated_backend(self):
+        key = "AKERNEL_RUNTIME_PROFILE_harbor-v1"
+        tokens = []
+
+        def send(_client, request, **_kwargs):
+            token = request.headers["X-Auth"]
+            tokens.append(token)
+            floor = 8192 if token == "secret" else 12288
+            return httpx.Response(
+                200,
+                json={"items": [{"id": "a", "status": 0, "labels": {key: str(floor)}}]},
+                request=request,
+            )
+
+        spec = _spec(extra_config={"managedRuntimeProfile": "harbor-v1"})
+        with patch.object(httpx.Client, "send", autospec=True, side_effect=send):
+            first = adx.AdxBackend(self.config)._managed_storage(spec)[0]
+            second = adx.AdxBackend(
+                replace(self.config, token="other")
+            )._managed_storage(spec)[0]
+        self.assertEqual((first.storage_mb, second.storage_mb), (8192, 12288))
+        self.assertEqual(tokens, ["secret", "other"])
+
+    def test_managed_probe_releases_followers_when_leader_is_interrupted(self):
+        backend = adx.AdxBackend(self.config)
+        entered = threading.Event()
+        release = threading.Event()
+        interruption = KeyboardInterrupt("cancel resource read")
+
+        def send(_client, _request, **_kwargs):
+            entered.set()
+            self.assertTrue(release.wait(timeout=5))
+            raise interruption
+
+        with patch.object(httpx.Client, "send", autospec=True, side_effect=send):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                leader = pool.submit(backend._managed_resource_nodes)
+                self.assertTrue(entered.wait(timeout=5))
+                follower = pool.submit(backend._managed_resource_nodes)
+                release.set()
+                for result in [leader, follower]:
+                    with self.assertRaises(KeyboardInterrupt):
+                        result.result(timeout=5)
+        self.assertIsNone(backend._managed_resource_pending)
+
+    def test_managed_probe_drops_inherited_process_state_before_locking(self):
+        backend = adx.AdxBackend(self.config)
+        backend._managed_resource_pid = -1
+        backend._managed_resource_lock.acquire()
+        with patch.object(
+            httpx.Client,
+            "send",
+            autospec=True,
+            return_value=httpx.Response(
+                200,
+                json={"items": []},
+                request=httpx.Request("GET", "https://api.example"),
+            ),
+        ):
+            self.assertEqual(backend._managed_resource_nodes(), [])
+        self.assertEqual(backend._managed_resource_pid, os.getpid())
 
     def _failed_create_calls(self, stage, ownership):
         calls = []

@@ -17,10 +17,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
 from collections.abc import Mapping
+from concurrent.futures import Future
 from dataclasses import dataclass, replace
 from typing import Any, cast
 
@@ -44,6 +46,7 @@ from ..types import (
     Mount,
     NetworkPolicy,
     NetworkRule,
+    NodeInfo,
     PortRange,
     SandboxInfo,
     SnapshotInfo,
@@ -1183,6 +1186,51 @@ class AdxBackend:
             gateway_use_tls=config.gateway_endpoint.use_tls,
             verify_tls=config.verify_tls,
         )
+        self._reset_managed_resource_probe()
+
+    def _reset_managed_resource_probe(self) -> None:
+        self._managed_resource_lock = threading.Lock()
+        self._managed_resource_cache: tuple[float, list[NodeInfo]] | None = None
+        self._managed_resource_pending: Future[list[NodeInfo]] | None = None
+        self._managed_resource_pid = os.getpid()
+
+    def _managed_resource_nodes(self) -> list[NodeInfo]:
+        # This advisory geometry view is scoped to one authenticated backend.
+        # Do not send one identical TCP/TLS resource query per concurrent create.
+        # Scheduling and node authorization remain authoritative on every create.
+        if self._managed_resource_pid != os.getpid():
+            self._reset_managed_resource_probe()
+        with self._managed_resource_lock:
+            cached = self._managed_resource_cache
+            if cached is not None and time.monotonic() < cached[0]:
+                return cached[1]
+            pending = self._managed_resource_pending
+            leader = pending is None
+            if pending is None:
+                pending = Future()
+                self._managed_resource_pending = pending
+        if not leader:
+            return pending.result()
+        try:
+            client = EnvironmentClient(connection=self._connection)
+            try:
+                response = client._http.get(client._origin + RESOURCE_PATH, timeout=15)
+                if response.status_code >= 400:
+                    raise client._http_error(response)
+                nodes = parse_resource_nodes(response.json())
+            finally:
+                client.close()
+            with self._managed_resource_lock:
+                self._managed_resource_cache = (time.monotonic() + 1.0, nodes)
+            pending.set_result(nodes)
+            return nodes
+        except BaseException as error:
+            pending.set_exception(error)
+            raise
+        finally:
+            with self._managed_resource_lock:
+                if self._managed_resource_pending is pending:
+                    self._managed_resource_pending = None
 
     def pty_for(self, instance_id: str) -> Any:
         """Attach a PTY to an existing sandbox with the backend connection."""
@@ -1362,16 +1410,10 @@ class AdxBackend:
         ):
             raise ValueError("Invalid managed runtime profile")
         key = _MANAGED_PROFILE_LABEL + profile
-        client = EnvironmentClient(connection=self._connection)
         try:
-            response = client._http.get(client._origin + RESOURCE_PATH, timeout=15)
-            if response.status_code >= 400:
-                raise client._http_error(response)
-            nodes = parse_resource_nodes(response.json())
+            nodes = self._managed_resource_nodes()
         except Exception as error:
             raise _convert_error("resolve managed runtime resources", error) from error
-        finally:
-            client.close()
         floors: set[int] = set()
         for node in nodes:
             if node.status != 0 or (spec.node_id and node.id != spec.node_id):
