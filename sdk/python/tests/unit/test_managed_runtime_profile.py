@@ -5,12 +5,56 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from akernel_sdk import DockerRuntime, build_image
+from akernel_sdk import DockerRuntime, TimeoutException, build_image
 from akernel_sdk._managed_build import upload_context
 from akernel_sdk.types import CommandResult
 
 
 class ManagedProfileContract(unittest.TestCase):
+    def test_command_timeout_preserves_partial_build_log_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Dockerfile").write_text("FROM scratch\n")
+            sandbox = MagicMock(id="owned-helper")
+            failure = TimeoutException(
+                "execution deadline",
+                code="COMMAND_TIMEOUT",
+                command_result=CommandResult("stdout", "stderr", None),
+            )
+            sandbox.commands.run.side_effect = failure
+            with (
+                patch("akernel_sdk.sandbox.Sandbox", return_value=sandbox),
+                patch("akernel_sdk._managed_build.upload_context"),
+                self.assertRaises(TimeoutException) as caught,
+            ):
+                build_image(root, profile="harbor-v1", log_path=root / "build.log")
+            self.assertIs(caught.exception, failure)
+            self.assertEqual((root / "build.log").read_text(), "stdoutstderr")
+            sandbox.kill.assert_called_once()
+
+    def test_partial_log_write_failure_cannot_replace_command_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Dockerfile").write_text("FROM scratch\n")
+            sandbox = MagicMock(id="owned-helper")
+            failure = TimeoutException(
+                "execution deadline", command_result=CommandResult("partial", "", None)
+            )
+            sandbox.commands.run.side_effect = failure
+            with (
+                patch("akernel_sdk.sandbox.Sandbox", return_value=sandbox),
+                patch("akernel_sdk._managed_build.upload_context"),
+                patch.object(Path, "write_text", side_effect=OSError("disk full")),
+                self.assertRaises(TimeoutException) as caught,
+            ):
+                build_image(root, profile="harbor-v1", log_path=root / "build.log")
+            self.assertIs(caught.exception, failure)
+            if hasattr(failure, "add_note"):
+                self.assertTrue(
+                    any("partial build log" in note for note in failure.__notes__)
+                )
+            sandbox.kill.assert_called_once()
+
     def test_invalid_preparation_requests_fail_before_creating_a_sandbox(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -455,8 +455,9 @@ class ComposeProject:
     def _operation(self, args: Sequence[str], timeout: int) -> CommandResult:
         try:
             result = self.run(args, timeout=timeout)
-        except BackendOperationError:
+        except BackendOperationError as error:
             # Unknown outcomes are never retried by the Compose layer.
+            self._retain_partial_log(args[0] + ".log", error)
             raise
         if self._output is not None:
             (self._output / (args[0] + ".log")).write_text(
@@ -475,6 +476,20 @@ class ComposeProject:
             raise ComposeOperationError(args[0], result)
         return result
 
+    def _retain_partial_log(self, name: str, error: BackendOperationError) -> None:
+        if self._output is None or error.command_result is None:
+            return
+        try:
+            partial = error.command_result
+            (self._output / name).write_text(partial.stdout + partial.stderr)
+        except OSError as logging_error:
+            add_note = getattr(error, "add_note", None)
+            if callable(add_note):
+                add_note(
+                    "Could not preserve partial operation log: "
+                    + type(logging_error).__name__
+                )
+
     def build(self, *, no_cache: bool = False, timeout: int = 600) -> None:
         if self._descriptor.get("managed_runtime_profile"):
             command = shlex.join(
@@ -487,7 +502,11 @@ class ComposeProject:
                     *(["--no-cache"] if no_cache else []),
                 ]
             )
-            result = self._execute(command, timeout=timeout)
+            try:
+                result = self._execute(command, timeout=timeout)
+            except BackendOperationError as error:
+                self._retain_partial_log("build.log", error)
+                raise
             if self._output is not None:
                 (self._output / "build.log").write_text(result.stdout + result.stderr)
             if result.exit_code != 0:
