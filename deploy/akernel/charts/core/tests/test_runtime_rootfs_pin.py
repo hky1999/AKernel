@@ -51,6 +51,24 @@ class RuntimeRootfsPinTest(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.assertNotEqual(render(**changes).returncode, 0)
 
+    def test_separately_qualified_current_execd_does_not_change_source_or_guest(self):
+        result = render(**{'node.runtimeRootfsPin.currentExecdSha256': 'd' * 64})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        objects = [item for item in yaml.safe_load_all(result.stdout) if item]
+        spec = next(item for item in objects if item['kind'] == 'DaemonSet')['spec']['template']['spec']
+        initializers = {item['name']: item for item in spec['initContainers']}
+        self.assertIn('c' * 64, initializers['stage-runtime-rootfs']['args'])
+        self.assertNotIn('d' * 64, initializers['stage-runtime-rootfs']['args'])
+        self.assertIn('d' * 64, initializers['verify-runtime-rootfs']['args'])
+        self.assertNotIn('c' * 64, initializers['verify-runtime-rootfs']['args'])
+        main = next(item for item in spec['containers'] if item['name'] == 'akernel-node')
+        mount = next(item for item in main['volumeMounts'] if item['mountPath'] == '/opt/akernel/runtime/akernel-runtime-rootfs.img')
+        self.assertEqual(mount['subPath'], 'runtime-rootfs/' + 'b' * 64 + '.img')
+        self.assertTrue(mount['readOnly'])
+        for invalid in ['../image', 'd' * 63, 'D' * 64]:
+            with self.subTest(invalid=invalid):
+                self.assertNotEqual(render(**{'node.runtimeRootfsPin.currentExecdSha256': invalid}).returncode, 0)
+
     def test_disabled_pin_leaves_worker_runtime_mounts_unchanged(self):
         result = render(**{'node.runtimeRootfsPin.enabled': 'false'})
         self.assertEqual(result.returncode, 0, result.stderr)
