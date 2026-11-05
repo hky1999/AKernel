@@ -17,7 +17,7 @@
     }
   },
   "candidate_gitlinks": {
-    "sandboxd": "ee2965cc12eeed871da6ce84a61aa01f587d72c4",
+    "sandboxd": "56d9b015fafd21443fa760b3f38afe20d7856458",
     "agent_dx": "d2979261c60ce308f92d160999847d2902b67223"
   },
   "pinned_runtime_artifacts": {
@@ -39,7 +39,7 @@
   "publication_requirement": "Default Agent DX platform and Execd URL/checksum pairs select the matching upstream-published release. Verify architecture, manifests and matching Execd bytes before packaging. Sandboxd remains a source-preview candidate pending review and cluster qualification; full runtime artifacts remain pinned to their published bundles.",
   "candidate_patch": {
     "sandboxd": {
-      "source_commit": "ee2965cc12eeed871da6ce84a61aa01f587d72c4",
+      "source_commit": "56d9b015fafd21443fa760b3f38afe20d7856458",
       "pull_request": "https://github.com/inclusionAI/sandboxd/pull/101",
       "reason": "Collection-scoped image ownership and durable node-local live/checkpoint leases; remove service-lifetime unused ROFS retention. Local gates passed; cluster qualification recorded separately."
     }
