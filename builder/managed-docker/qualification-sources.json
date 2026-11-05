@@ -13,12 +13,12 @@
     },
     "agent_dx": {
       "branch": "master",
-      "commit": "e87a3a4cb448259b6a6138e2761ddec50786a711"
+      "commit": "d2979261c60ce308f92d160999847d2902b67223"
     }
   },
   "candidate_gitlinks": {
     "sandboxd": "ee2965cc12eeed871da6ce84a61aa01f587d72c4",
-    "agent_dx": "d8d8fea64bf45ad745cb7fc264f58ab42cb7dc6d"
+    "agent_dx": "d2979261c60ce308f92d160999847d2902b67223"
   },
   "pinned_runtime_artifacts": {
     "gvisor": {
@@ -36,19 +36,8 @@
   },
   "afs_enabled": false,
   "envd_enabled": false,
-  "publication_requirement": "Build and verify matching platform and Execd archives from the pinned candidate source, and record both archive checksums in the framework build. Before formal release, publish reviewed component artifacts through CI and align source pins and default download URL/checksum pairs. Candidate build overrides are not formal releases.",
+  "publication_requirement": "Default Agent DX platform and Execd URL/checksum pairs select the matching upstream-published release. Verify architecture, manifests and matching Execd bytes before packaging. Sandboxd remains a source-preview candidate pending review and cluster qualification; full runtime artifacts remain pinned to their published bundles.",
   "candidate_patch": {
-    "agent_dx": {
-      "source_commit": "3432d411b60eddc0eb33899c4f191b0cdf745e5f",
-      "rebased_commit": "d8d8fea64bf45ad745cb7fc264f58ab42cb7dc6d",
-      "reason": "Preserve the remaining publication budget, isolate independent checkpoint reference/catalog commits, and fence local deletion RPCs against new artifact references. Cluster and release qualification are recorded separately.",
-      "pull_request": "https://github.com/openJiuwen-ai/agent-dx/pull/212",
-      "candidate_commits": [
-        "09478c9e23aee1e59360492230a56200c9f3252e",
-        "dbc5a44e5e7acc4d8435b3a44cb766bf50096ea3",
-        "d8d8fea64bf45ad745cb7fc264f58ab42cb7dc6d"
-      ]
-    },
     "sandboxd": {
       "source_commit": "ee2965cc12eeed871da6ce84a61aa01f587d72c4",
       "pull_request": "https://github.com/inclusionAI/sandboxd/pull/101",
