@@ -5,7 +5,7 @@
   "upstream_baselines": {
     "akernel": {
       "branch": "develop",
-      "commit": "b43d5481258b3536406e566d76fa32ed42a7d56b"
+      "commit": "724238ccf2d1b582824100f312f2031250daa3dc"
     },
     "sandboxd": {
       "branch": "main",
