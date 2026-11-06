@@ -8,6 +8,8 @@ Before enabling the pin, qualify a digest-pinned source image containing Python 
 
 When a published platform bundle changes its packaged Execd, an operator may explicitly set `node.runtimeRootfsPin.currentExecdSha256` to the separately verified carrier executable's SHA256 after qualifying that exact new platform with the old guest runtime and pre-upgrade snapshots. The source initializer still verifies `execdSha256`; only the new-platform initializer uses `currentExecdSha256`. Empty values preserve the original equal-hash check. This does not replace the guest executable, alter the cached rootfs or bypass runsc filesystem checks. Different hashes alone are not evidence of protocol compatibility: retain an explicit compatibility record and the original artifacts.
 
+The rootfs pin preserves filesystem identity only. It does not provide cross-version runsc checkpoint compatibility: runsc requires its checkpoint version to match the restoring binary. Retain the original complete runsc bundle and guest-rootfs tuple for old snapshots, or explicitly drain that snapshot generation before upgrading the active runtime. Do not bypass the runtime version check.
+
 The enabled worker pool must use the same architecture and qualified runtime tuple. This single pin does not configure heterogeneous runtime generations or automatically select an older runtime for a legacy snapshot.
 
 ```bash
