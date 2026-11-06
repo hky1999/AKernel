@@ -5,7 +5,7 @@
   "upstream_baselines": {
     "akernel": {
       "branch": "develop",
-      "commit": "b42a6912daa061c7b2c8438c368236e76d5c2a53"
+      "commit": "b43d5481258b3536406e566d76fa32ed42a7d56b"
     },
     "sandboxd": {
       "branch": "main",
@@ -13,12 +13,12 @@
     },
     "agent_dx": {
       "branch": "master",
-      "commit": "d2979261c60ce308f92d160999847d2902b67223"
+      "commit": "6a4c6d872edd6596361da3cb0e27ca55c3f5e1b0"
     }
   },
   "candidate_gitlinks": {
     "sandboxd": "56d9b015fafd21443fa760b3f38afe20d7856458",
-    "agent_dx": "d2979261c60ce308f92d160999847d2902b67223"
+    "agent_dx": "e611b9e4a83dcd6da5346bd17c2f6af28e244952"
   },
   "pinned_runtime_artifacts": {
     "gvisor": {
@@ -30,9 +30,12 @@
       "release": "v0.1.3"
     }
   },
-  "qualified_client_override": {
-    "native_adx_sdk": "e87a3a4cb448259b6a6138e2761ddec50786a711",
-    "note": "The maintained Harbor lock pins its native client independently of the runtime package SDK wheel."
+  "native_adx_sdk": {
+    "package": "adx-environment",
+    "version": "0.1.0rc4",
+    "publication_commit": "6a4c6d872edd6596361da3cb0e27ca55c3f5e1b0",
+    "package_source_commit": "e611b9e4a83dcd6da5346bd17c2f6af28e244952",
+    "note": "Dependency resolution uses the published package pinned in sdk/python/pyproject.toml. Harbor client overrides and existing cluster qualification apply only to their separately recorded source and image revisions."
   },
   "afs_enabled": false,
   "envd_enabled": false,
