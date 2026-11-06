@@ -17,7 +17,7 @@
     }
   },
   "candidate_gitlinks": {
-    "sandboxd": "ddfc4a7c809633aa096b66be6a270c2430c00110",
+    "sandboxd": "3801c8748e0cee65c5e9c1decdd0cab2b3b65a80",
     "agent_dx": "2f61d44d9c56ae029a06698c337cbdc4aeaaa7af"
   },
   "pinned_runtime_artifacts": {
@@ -42,9 +42,9 @@
   "publication_requirement": "The default amd64 platform/Execd URL and checksum pairs select the same clean merged upstream Agent DX source and matching static Execd bytes from a fixed fork prerelease. Verify architecture and complete manifests before packaging. This is a preview, not an upstream Agent DX release or completed cluster qualification. Sandboxd combines pending #101 with main including merged #102; gVisor uses the organization-published complete .4 bundle. The native Python SDK dependency remains index-resolved rc4; separately pinned Harbor source-client qualification is recorded outside this package.",
   "candidate_patch": {
     "sandboxd": {
-      "source_commit": "ddfc4a7c809633aa096b66be6a270c2430c00110",
+      "source_commit": "3801c8748e0cee65c5e9c1decdd0cab2b3b65a80",
       "pull_request": "https://github.com/inclusionAI/sandboxd/pull/101",
-      "reason": "Collection-scoped image ownership and durable node-local live/checkpoint leases; remove service-lifetime unused ROFS retention. Local gates passed; cluster qualification recorded separately.",
+      "reason": "Collection ownership and durable local leases, including latest PR101 R1: preflight and establish actual checkpoint hard-link lease before runtime capture. Unit/race and cluster gates recorded separately.",
       "upstream_runtime_pin": "https://github.com/inclusionAI/sandboxd/pull/102"
     }
   },
