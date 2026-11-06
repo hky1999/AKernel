@@ -271,32 +271,66 @@ def build_plan(
     no_cache: bool = False,
     registry_insecure: bool = False,
     publication_tag: str = "built",
-) -> tuple[dict, dict[str, str]]:
+) -> tuple[dict, dict[str, str], dict[str, str]]:
     """Adapt native Bake targets' output only; do not interpret Dockerfiles."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9/_-]*", prefix) or ".." in prefix:
         raise ValueError("Invalid session repository prefix")
     if not re.fullmatch(r"built|build-[0-9a-f]{32}", publication_tag):
         raise ValueError("Invalid native publication tag")
     targets = bake.setdefault("target", {})
+    native_services = {}
+    for target_name, target in targets.items():
+        service_name = target.get("labels", {}).get("com.docker.compose.service")
+        if service_name is not None:
+            if service_name in native_services:
+                raise ValueError(
+                    "Ambiguous native Bake targets for service: " + service_name
+                )
+            native_services[service_name] = target_name
     references = {}
-    for name, service in config["services"].items():
+    service_targets = {}
+    for index, (name, service) in enumerate(config["services"].items()):
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", name):
             raise ValueError("Unsupported Compose service name")
-        target = targets.get(name)
-        if target is None:
+        if service.get("build") is not None:
+            target_name = native_services.get(name)
+            # Exact names also support explicitly constructed single-image
+            # plans. Never guess Compose's name normalization or disregard
+            # a conflicting native service identity.
+            if (
+                target_name is None
+                and name in targets
+                and "com.docker.compose.service" not in targets[name].get("labels", {})
+            ):
+                target_name = name
+            if target_name is None:
+                raise ValueError("No native Bake target for build service: " + name)
+            target = targets[target_name]
+        else:
             # Image-only inputs use the official Dockerfile frontend for format
             # conversion, retaining OCI config. No Python layer reconstruction.
             image = service.get("image")
-            if not isinstance(image, str) or any(c.isspace() for c in image):
+            if (
+                not isinstance(image, str)
+                or not image
+                or any(c.isspace() for c in image)
+            ):
                 raise ValueError("Service requires an image or native build target")
             target = {"dockerfile-inline": "FROM " + image + "\n"}
-            targets[name] = target
+            target_name = "akernel_image_" + str(index)
+            while target_name in targets:
+                target_name += "_"
+            targets[target_name] = target
+        service_targets[name] = target_name
+        # Publication names are private invocation-local identities, not
+        # lowercased service names. An ordinal is injective even for Foo/foo or
+        # dotted/underscored names, and bounds repository-component length.
         reference = (
             registry
             + "/"
             + prefix.rstrip("/")
-            + "/"
-            + name.lower()
+            + "/service-"
+            + str(index)
             + ":"
             + publication_tag
         )
@@ -315,8 +349,8 @@ def build_plan(
         )
         if no_cache:
             target["no-cache"] = True
-    bake["group"] = {"default": {"targets": list(references)}}
-    return bake, references
+    bake["group"] = {"default": {"targets": list(service_targets.values())}}
+    return bake, references, service_targets
 
 
 def build(descriptor: dict, profile: dict, *, no_cache: bool = False) -> dict:
@@ -324,8 +358,16 @@ def build(descriptor: dict, profile: dict, *, no_cache: bool = False) -> dict:
     os.environ.update(descriptor.get("environment", {}))
     command = compose_command(descriptor)
     config = json.loads(execute([*command, "config", "--format", "json"], capture=True))
-    bake = json.loads(execute([*command, "build", "--print"], capture=True))
-    bake, targets = build_plan(
+    printed = execute([*command, "build", "--print"], capture=True)
+    if printed.strip():
+        bake = json.loads(printed)
+    elif any(
+        service.get("build") is not None for service in config["services"].values()
+    ):
+        raise ValueError("Compose returned an empty Bake plan for build services")
+    else:
+        bake = {}
+    bake, targets, service_targets = build_plan(
         descriptor,
         config,
         bake,
@@ -339,6 +381,15 @@ def build(descriptor: dict, profile: dict, *, no_cache: bool = False) -> dict:
     root.mkdir(mode=0o700, exist_ok=True)
     plan_path = root / "bake.json"
     plan_path.write_text(json.dumps(bake))
+    (root / "outputs.json").write_text(
+        json.dumps(
+            {
+                name: {"target": service_targets[name], "reference": tagged}
+                for name, tagged in targets.items()
+            },
+            indent=2,
+        )
+    )
     metadata_path = root / "metadata.json"
     metadata = bake_metadata(
         [
@@ -361,12 +412,7 @@ def build(descriptor: dict, profile: dict, *, no_cache: bool = False) -> dict:
     )
     references = {}
     for name, tagged in targets.items():
-        exported = next(
-            key
-            for key, value in bake["target"].items()
-            if value.get("tags") == [tagged]
-        )
-        digest = metadata[exported]["containerimage.digest"]
+        digest = metadata[service_targets[name]]["containerimage.digest"]
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
             raise ValueError("BuildKit did not return an immutable image digest")
         references[name] = tagged.rsplit(":", 1)[0] + "@" + digest
@@ -464,7 +510,7 @@ def image_build(context: str, profile: dict, *, no_cache: bool = False) -> dict:
     os.environ.setdefault("BUILDX_NO_DEFAULT_ATTESTATIONS", "1")
     start_builder(profile)
     metadata = context + ".metadata.json"
-    plan, targets = build_plan(
+    plan, targets, service_targets = build_plan(
         {},
         {"services": {"single": {"build": {}}}},
         {"target": {"single": {"context": context}}},
@@ -495,7 +541,7 @@ def image_build(context: str, profile: dict, *, no_cache: bool = False) -> dict:
         Path(metadata),
         profile,
     )
-    exported = plan["group"]["default"]["targets"][0]
+    exported = service_targets["single"]
     digest = values[exported]["containerimage.digest"]
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise ValueError("BuildKit did not return an immutable artifact")

@@ -4,6 +4,15 @@ This opt-in runtime profile delegates Dockerfile/Compose semantics to Docker's o
 
 The runtime tool image contains Docker, Compose, Buildx and the AKernel snapshotter/registration helper. Session endpoints and credentials are injected at launch, outside the image. Buildx pushes native Nydus OCI artifacts directly to an internal CNCF Distribution Registry and returns digest references. No OCI archive passes through the Harbor client and no task artifact is published to ACR.
 
+Build targets are matched to services through native Compose service labels,
+preserving case and punctuation. Image-only projects need no native build
+targets; their images still pass through the native format-conversion exporter.
+Publication names are unique within each invocation, and `outputs.json` retains
+the service-to-target/reference mapping used to read Buildx results. Image
+references are opaque handles; consumers must not derive them by lowercasing a
+service name. A missing or ambiguous build target is an error, even when the
+service also declares an image.
+
 `image_provider.py` runs on the runtime node. Its session capability accepts only immutable references in an operator-authorized Registry/repository prefix. It validates OCI metadata, calls sandboxd's private image-management Unix socket, and exports existing ROFS through a read-only collection. Dragonfly and the node's existing image manager own content distribution/caching; this adapter does not maintain a second layer cache. `akernel-image-bridge` imports checked metadata and committed roots into inner containerd; unknown extraction roots still fail closed. Private service uppers remain inside the outer sandbox's checkpoint boundary.
 
 The Registry requires private routes from build workers for push and from runtime nodes for pull. Harbor clients do not require direct Registry access or Kubernetes credentials. Registry credentials are separate from AKernel API keys. Use TLS with a trust chain available to build workers, runtime nodes and the configured distribution path. Private HTTP requires an explicit isolated-network policy and compatible Dragonfly configuration. Standard scoped Bearer authentication can retain access control without applying a password hash to each manifest/blob request. `registry.insecure` is an explicit operator option, not a default.
@@ -28,6 +37,20 @@ Single-container `image-build` returns verified artifact/process metadata throug
 Versioned managed collections use Sandboxd's node-local live/checkpoint leases. The broker holds the collection's `flock` during each operation and sends its explicit owner to the private image-management API. The last live/in-flight/retained-checkpoint reference releases exported roots and management ownership while preserving ordinary rootfs consumers; retained managed checkpoints intentionally keep dependencies alive and count toward the node's ROFS budget. Missing/copied checkpoint markers fail closed. Legacy collections remain pinned for an operator drain because their history cannot be inferred safely. Deploy the broker and Sandboxd together: the new management API rejects anonymous ownership, and old Sandboxd rejects the new owner field. See Sandboxd's checkpoint/restore contract for local-filesystem and recovery requirements. Cross-node reconstruction and Registry artifact GC remain separate work.
 
 Run adapter regressions with `python3 -m unittest discover -s builder/managed-docker -p 'test_*.py'`. SDK changes additionally require `make sdk-check`; helper changes require `go test ./...` in `builder/image-bridge`. Use an owned namespace/data directory and delete sandbox/snapshot records before unmounting collections or deleting Registry storage.
+
+To also validate plans with official Compose and Buildx, supply executable paths
+from the selected runtime toolchain:
+
+```sh
+AKERNEL_TEST_DOCKER_COMPOSE=/path/to/docker-compose \
+AKERNEL_TEST_BUILDX=/path/to/docker-buildx \
+python3 -m unittest discover -s builder/managed-docker -p 'test_*.py'
+```
+
+These additional tests use an empty client configuration and an unavailable
+Docker socket. They exercise native parsing and `bake --print`, without a
+daemon, builds, Registry traffic or cluster changes. Real publication and
+checkpoint/restore require separate runtime integration tests.
 
 ## Platform-owned profile
 

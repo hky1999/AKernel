@@ -27,7 +27,7 @@ class NativeBuildContract(unittest.TestCase):
             }
             identity = "sha256:" + "a" * 64
             artifact = {
-                "reference": "registry.test/poc/job/single@" + identity,
+                "reference": "registry.test/poc/job/service-0@" + identity,
                 "image_process": {"WorkingDir": "/app"},
             }
 
@@ -62,7 +62,7 @@ class NativeBuildContract(unittest.TestCase):
             "args": {"MODE": "native"},
             "secret": ["id=build,src=/secret"],
         }
-        plan, refs = compose.build_plan(
+        plan, refs, _ = compose.build_plan(
             {},
             {"services": {"main": {"build": {}}}},
             {"target": {"main": dict(original)}},
@@ -83,7 +83,7 @@ class NativeBuildContract(unittest.TestCase):
             "akernel_harness_python": {"context": "/user-helper"},
             "main": {"context": "/main"},
         }
-        plan, _ = compose.build_plan(
+        plan, _, _ = compose.build_plan(
             {},
             {"services": {"main": {"build": {}}}},
             {"target": native},
@@ -137,7 +137,7 @@ class NativeBuildContract(unittest.TestCase):
             "secret": ["id=private,src=/run/session"],
             "cache-from": ["type=registry,ref=registry.test/cache:step"],
         }
-        plan, refs = compose.build_plan(
+        plan, refs, _ = compose.build_plan(
             {},
             {"services": {"main": {"build": {}}}},
             {"target": {"main": dict(native)}},
@@ -150,11 +150,11 @@ class NativeBuildContract(unittest.TestCase):
         self.assertNotIn("no-cache", actual)
         self.assertNotIn("registry.insecure", actual["output"][0])
         self.assertIn("compression=nydus", actual["output"][0])
-        self.assertEqual(refs, {"main": "registry.test/poc/job/main:built"})
+        self.assertEqual(refs, {"main": "registry.test/poc/job/service-0:built"})
 
     def test_image_only_conversion_uses_native_dockerfile_frontend(self):
         image = "registry.test/base@sha256:" + "a" * 64
-        plan, _ = compose.build_plan(
+        plan, _, services = compose.build_plan(
             {},
             {"services": {"loadgen": {"image": image}}},
             {},
@@ -163,7 +163,7 @@ class NativeBuildContract(unittest.TestCase):
             True,
             True,
         )
-        target = plan["target"]["loadgen"]
+        target = plan["target"][services["loadgen"]]
         self.assertEqual(target["dockerfile-inline"], "FROM " + image + "\n")
         self.assertTrue(target["no-cache"])
         self.assertIn("registry.insecure=true", target["output"][0])
