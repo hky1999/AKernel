@@ -1,69 +1,160 @@
 # Managed Compose integration
 
-## Native managed profile (optional preview)
+The managed runtime runs Docker and Compose inside one outer AKernel sandbox.
+Applications submit their original Dockerfiles, build contexts and Compose files.
+The operator supplies build connectivity, tools, Registry authorization and shared
+read-only image layers. The SDK exposes project, service and process handles.
+This opt-in Linux/amd64 runsc profile is separate from the SDK's strict Dockerfile
+interpreter.
 
-For the platform-managed path, select `DockerRuntime(profile="harbor-v1")`; the operator supplies tools, build connectivity, Registry authorization and shared ROFS preparation. `ComposeProject.prepare()` freezes input without parsing managed YAML. After `Sandbox(**project.sandbox_options())`, call `project.start_runtime(sandbox)` to resolve effective services using the official Compose CLI, then use `build()`, `pull()`, `up()` and service handles. Native merge tags such as `!reset` remain intact.
+## Component responsibilities
 
-The SDK resolves this profile's storage floor from authenticated worker metadata before allocation. The example profile reserves 4096 MiB for the private image upper plus 4096 MiB for the root layer, so omitted storage defaults to an 8192 MiB reservation. Explicit requests or limits below the platform floor fail before creation. Eligible-worker placement and Sandboxd's final quota check enforce the same contract; callers do not choose node paths or credentials. Operators must publish the derived metadata described in the [managed-runtime guide](../../../builder/managed-docker/README.md).
-
-Snapshot compatibility excludes the tenant allowlist while restore always checks current authorization. Adding tenants preserves existing snapshots; revoking a tenant denies restore. Upgrading from the earlier fingerprint format requires draining preview snapshots. Durable leases, service-restart recovery, cross-node recovery, tenant-scoped Registry credentials and GC remain unqualified. The following sections describe the legacy client-managed path and its separate prerequisites.
-
-The SDK manages Docker and Compose inside one outer AKernel sandbox. Callers can keep original Dockerfiles and Compose definitions. It is an opt-in Linux/amd64 runsc profile, separate from the lightweight Dockerfile direct-launch parser.
-
-## Component boundary
-
-| Layer | Responsibility |
+| Component | Responsibility |
 | --- | --- |
-| Evaluation framework such as Harbor | Translate task resources, bind paths and verifier isolation; run the model proxy; choose checkpoint boundaries; persist aligned conversation state and fence the previous execution before recovery. |
-| AKernel SDK | Discover startup-declared images, validate immutable OCI metadata, prepare mounts, bootstrap Docker/containerd/bridge once, build/up projects, expose service I/O and process identities, reconnect client tunnels and owned network rules. |
-| Agent DX | Existing environment creation, exec/files/tunnel transport and reusable snapshot control. No Compose-aware server API is introduced. |
-| Sandboxd | Existing shared ROFS image provider plus private, quota-accounted file-backed tmpfs mounts. Validate and clone managed filestores during checkpoint/restore. |
-| runsc | Capture the entire outer sandbox, including dockerd, services, process memory, filesystem metadata and sockets. Reflink shares file-backed data; it does not turn RAM capture into a dirty-page incremental snapshot. |
+| Application or evaluation framework | Task resources, environment variables, bind paths, verifier isolation, checkpoint timing and client-side state. Fence the source before restoring a running clone. |
+| AKernel SDK | Freeze and transfer inputs, submit runtime operations, expose artifact/project/service/process handles and reconnect client tunnels. |
+| Managed runtime | Run official Docker Compose and Buildx remote, publish immutable image references, prepare authorized ROFS collections and start Docker/containerd with private writable layers. |
+| Agent DX | Environment creation, command/file/tunnel transport and reusable snapshot control. |
+| Sandboxd and the image manager | Authorize profiles, enforce storage quotas, distribute shared ROFS content and retain live/checkpoint collection leases. |
+| runsc | Capture the complete outer sandbox, including Docker, services, memory, private filesystem state and sockets. |
 
-The image bridge downloads only OCI manifests/configs on the client. Sandboxd's existing OCI/ROFS provider supplies shared lower roots and owns layer distribution/cache. Each sandbox has a separate writable upper. Client metadata credentials and node image-pull credentials are separate. There is no second shared layer cache in the SDK.
+BuildKit owns build-step caching. Dragonfly and the existing image manager own
+final image distribution and ROFS caching. Each sandbox has a private writable
+upper; the SDK does not maintain a second shared image-layer cache.
 
-## Integration order and prerequisites
+## Operator prerequisites
 
-This implementation is based on the reusable snapshot/lifecycle SDK already merged into `develop`. It retains that implementation's creation ownership checks, atomic command identity, cancellation and rollback semantics. It does not include the older preview's metadata/lifetime/callback API extensions.
+1. Configure a managed-runtime profile with an immutable tool image, a reachable
+   remote BuildKit endpoint, an internal Registry and authorized tenants. Build
+   workers need Registry push access; runtime nodes need pull access. Harbor
+   clients need neither Registry credentials nor Kubernetes access.
+2. Enable runsc file-backed writable mounts, reflink checkpoint mode and durable
+   output synchronization on a compatible filesystem. On Linux 5.10, backing
+   files and checkpoint clones must use the same mount object. Collection leases
+   and checkpoint output must share a filesystem. The SDK cannot enable these
+   features through a snapshot option.
+3. Configure Docker 28's runsc flags `--net-raw=true` and
+   `--allow-packet-socket-write=true`. Package Docker, Compose, Buildx, containerd,
+   the [image bridge](../../../builder/image-bridge/README.md) and support tools
+   in the operator's runtime image. User task images do not need these tools.
+4. Publish the profile's storage floor through authenticated worker metadata.
+   See the [operator guide](../../../builder/managed-docker/README.md) for
+   configuration, service installation and storage-label generation.
 
-1. Review and merge Sandboxd's `fileBackedTmpfsMounts` support ([Sandboxd #83](https://github.com/inclusionAI/sandboxd/pull/83)). The AKernel consumer must then pin the merged Sandboxd revision and qualify a normal build before offering the file-backed profile. This SDK patch does not replace the existing gitlink or runtime bundle.
-2. Configure runsc reflink mode, durable output sync, sufficient writable quota and a compatible backing/checkpoint filesystem. On Linux 5.10 these paths must use the same mount object. The separate [AKernel #126](https://github.com/inclusionAI/AKernel/pull/126) adds an explicit Helm profile without changing defaults. Docker 28 also requires operator-enabled `--net-raw=true` and `--allow-packet-socket-write=true`.
-3. Build the matching [image bridge](../../../builder/image-bridge/README.md). Use `DockerRuntime.default_image` (public `docker.io/library/docker:28.3.3-dind`); fresh startup installs missing Alpine support packages. An explicitly supplied compatible outer image may instead preinstall Docker 28.3.3, containerd/ctr, Python 3, Bash, mount/findmnt, iproute and legacy iptables tools. No user task Dockerfile changes or task image publication are needed.
-4. Install the SDK revision containing `ComposeProject`, then use [the maintained example](../examples/compose_checkpoint.py). An independent verifier prepares its own project and outer sandbox; it does not attach to the agent sandbox.
+The SDK derives the storage floor from that worker metadata before allocation.
+For example, a 4096 MiB image upper plus a 4096 MiB root reservation requires
+8192 MiB total. Omitted storage uses the advertised floor; explicit requests or
+limits below it fail before creation. Sandboxd checks the actual quota again.
 
-The SDK never updates node configuration or deployments. The snapshot/restore API has no client switch that can enable reflink on an unconfigured backend.
+## Fresh creation
 
-Use a helper advertising `{"discover_schema":2}` through `--mode capabilities`.
-The SDK checks this before dispatching project data; the earlier `72e706e2`
-binary is insufficient for this revision. Discovery keeps Dockerfile/build
-context and project `.env` reads inside the frozen project and receives only
-explicit project variables. `include` and `extends.file` are not supported by
-this preview. Pass explicit supported Compose overlays; do not assume complete
-Compose syntax compatibility. Original kv-live-surgery definitions need no edit.
+Select the operator-provided profile:
 
-## Fresh creation and recovery
+```python
+from akernel_sdk import ComposeProject, DockerRuntime, Sandbox
 
-`ComposeProject.prepare()` creates a frozen local context and resolves image inputs before sandbox creation. Pass `project.sandbox_options()` into creation, then call `start_runtime()`, `build()`, `pull()` and `up()` at explicit boundaries. A partial startup is not replayable on that project object; the owner must clean up its newly created sandbox.
+project = ComposeProject.prepare(
+    "./project", ["./project/docker-compose.yaml"],
+    runtime=DockerRuntime(profile="harbor-v1"),
+    network="bridge", output_dir="./artifacts/compose",
+)
+sandbox = Sandbox(**project.sandbox_options())
+try:
+    project.start_runtime(sandbox)
+    project.build(timeout=600)
+    project.pull(timeout=600)
+    project.up(wait_timeout=600)
+    print(project.service("main").exec("uname -s").stdout)
+finally:
+    sandbox.kill()
+```
 
-With `auto_images=True`, image-only services (including `image: name:tag@sha256:...`) use the same prepared ROFS roots as Dockerfile bases. `pull()` verifies each pinned Docker reference and committed bridge snapshot instead of issuing a second native pull. `up()` repeats that verification and disables native pulls; builds remain enabled. Tags are resolved once during preparation. Missing snapshots or changed references fail visibly without downloading/extracting a replacement into the private upper. Ordinary Compose without automatic images retains native pull behavior. Original project files and image declarations are unchanged.
+Keep `output_dir` outside the input context. The SDK freezes inputs without
+parsing managed YAML; official Compose resolves services after `start_runtime()`,
+including native `!reset` and `!override` tags. Service handles become available
+at that point. BuildKit receives the original Dockerfile and context through
+Buildx remote. Normal build caches remain enabled unless `no_cache=True` is
+explicitly requested.
 
-Plans validate the selected linux/amd64 manifest/config and derive its chain ID
-from the rootfs diff IDs. Different config or index/manifest digests may share
-the same chain. Scratch-only automatic builds carry an explicit empty-plan
-marker; unused aliases from a manually selected service plan are not registered.
-An absent command exit status remains an unknown outcome. A timeout/cancel
-retains command identity and secondary kill errors, without replaying execution.
+The runtime publishes digest-addressed images and prepares their ROFS roots.
+The image bridge registers validated image aliases and committed snapshots in
+inner containerd. Missing registrations fail instead of extracting replacement
+lower layers into the sandbox's private upper. A partially completed startup
+must not be replayed on the same project object; delete the owned sandbox and
+retain its diagnostics and any cleanup errors.
 
-For checkpointing, call `sandbox.create_snapshot()` directly. Sandboxd/runsc captures and freezes the entire outer sandbox, including running Compose commands and services; application signals, Python and an idle model request are not prerequisites. Persist the snapshot ID and project descriptor. `ServiceHandle.start_command()` needs no Python in that service; persist its stable command ID for later reconnection.
+## Checkpoint and recovery
 
-To recover, fence the old execution before creating a running clone with `Sandbox.from_snapshot(..., **project.sandbox_options())`. Keep the original upper geometry, mounts, current network policy and reverse tunnel. `ComposeProject.attach()` reconstructs local bindings; `reconnect_network()` refreshes owned forwarding/NAT for the new TAP. Reconnect a captured native command through `restored.commands.connect(command_id)` without rebuilding, calling up, relaunching or sending SIGCONT. Explicit inner-process signal/inspect clients may still use `start_process()`/`ServiceProcessHandle`, which has its own optional guest Python requirement.
+Call `sandbox.create_snapshot()` externally. Sandboxd/runsc freezes and captures
+the whole sandbox; application signals, Python and an idle model request are not
+prerequisites. Persist the snapshot ID and `project.descriptor`. For a command
+started with `ServiceHandle.start_command()`, persist its stable `command_id`.
 
-Harbor's Python memory and local model proxy are outside the remote snapshot. Their aligned state remains the framework's responsibility. A service-specific controlled TCP entry makes the existing outer reverse tunnel reachable from a bridge container without changing HTTP, auth headers or SSE.
+Fence the source before creating a running clone with
+`Sandbox.from_snapshot(..., **project.sandbox_options())`. Preserve the upper
+geometry, mounts, reverse tunnel and current network policy. Bind the restored
+sandbox using `ComposeProject.attach(restored, descriptor)`, then call
+`reconnect_network()` to update owned forwarding/NAT for the new outer TAP.
+Reconnect captured commands with `restored.commands.connect(command_id)`.
+Do not rerun builds, Compose up, Docker startup or the agent command, and do not
+send SIGCONT as part of ordinary whole-sandbox restore.
 
-## Supported scope and verification
+The snapshot does not include the Harbor client's memory, model proxy or
+external services. Applications own consistency with those external systems.
+Ordinary service exec and `start_command()` require no Python in the service.
+The optional `start_process()`/`ServiceProcessHandle` API provides inner-process
+inspection and signalling through a Python monitor in that service.
 
-The default profile retains native default/custom IPv4 bridges, service DNS/aliases and TCP/UDP userland port mappings. The opt-in `tests/integration/test_compose_network.py` checks existing inner and published-port TCP sockets across two delete/restore cycles, as well as peer-restricted model HTTP/auth/SSE and new egress. It requires a dedicated compatible test endpoint and is not run against a shared production deployment by CI. External TCP address migration, IPv6-only egress, non-bridge drivers, remote build contexts, arbitrary runtime-created images and complete Docker content-store/export compatibility are not claimed. Managed process handles require Python 3 in that service; ordinary service exec does not.
+A service-specific controlled TCP entry exposes an existing outer reverse tunnel
+to a bridge container without rewriting HTTP, authentication headers or SSE.
+After recovery, attach saved descriptors rather than creating new listeners.
+See the [SDK networking API](../README.md#native-compose-networking-and-model-tunnels).
 
-The earlier Harbor prototype passed original-process Claude C/R and an independent verifier on unchanged kv-live-surgery inputs. Those measurements predate this migration onto the current `develop` SDK and do not qualify the new revision or its newly pinned upstream bundle. One earlier prototype checkpoint returned no result before its 300-second deadline despite completed serialization; the later successful cycles did not establish a root cause. Keep fresh isolated end-to-end qualification as a merge/release requirement.
+## Retention, authorization and limits
 
-Local review checks are `make sdk-check` and `CGO_ENABLED=0 go test ./...` under `builder/image-bridge`; CI also vets and builds the bridge and validates clean wheel/sdist installs. Existing upstream ownership/fork/rollback tests stay in place.
+Managed snapshots retain node-local collection leases. The last live or retained
+checkpoint reference releases unused mounts; retained snapshots therefore count
+toward the node's ROFS budget. Restore validates the collection, profile and
+current tenant authorization. Adding tenants does not invalidate compatible
+snapshots; revoking a tenant denies restore. Changes to captured tool, bootstrap
+or storage geometry require a snapshot compatibility and drain plan.
+
+Restore requires the retained collection on the same node and mount view.
+Cross-node collection reconstruction, automatic Registry artifact GC and
+replacement of a provider identity are outside this contract. Removing a local
+mount does not authorize deletion of its Registry artifact. Keep referenced
+runtime images and compatible complete runsc bundles available.
+
+Supported networking is default/custom IPv4 bridge networking with service
+DNS/aliases and TCP/UDP userland port mappings. External TCP address migration,
+IPv6-only egress, non-bridge drivers, remote build contexts, arbitrary
+runtime-created images and full Docker content-store/export compatibility are
+outside the supported scope. Scaled service process handles are rejected.
+
+## Client-managed runtime
+
+For an explicitly client-managed deployment, use
+`prepare_compose_images()` and `DockerRuntime(bridge_binary=...)`, or
+`ComposeProject.prepare(..., auto_images=True)`. The client discovers image
+metadata and supplies mount options; node pull authorization remains separate.
+These options are not needed with `DockerRuntime(profile=...)`.
+
+The helper must report `discover_schema: 2` through `--mode capabilities`.
+Discovery confines Dockerfile, build-context and `.env` reads to the frozen
+project and receives only explicitly supplied variables. External `include` /
+`extends.file`, remote contexts and platform emulation are unsupported in this
+client-managed path. See [the helper guide](../../../builder/image-bridge/README.md)
+and [the client-managed example](../examples/compose_checkpoint.py).
+
+## Verification
+
+Run `make sdk-check`, the managed-runtime adapter unit tests and image-bridge Go
+tests when changing these interfaces. Against an owned compatible endpoint,
+verify unchanged task inputs, main and sidecar health, original process/memory
+and filesystem recovery, and an independent verifier. Record failures and clean
+up owned environments and snapshots even when an operation fails.
+
+The opt-in `tests/integration/test_compose_network.py` checks default/custom DNS,
+network isolation, TCP/UDP mappings, controlled model HTTP/auth/SSE and existing
+inner/published-port TCP sockets across two delete/restore cycles. Its endpoint
+and runtime prerequisites are explicit; CI does not run it on a shared cluster.

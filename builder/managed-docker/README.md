@@ -1,14 +1,14 @@
-# Managed Docker remote-build preview
+# Managed Docker runtime
 
-This isolated runtime-side proof of concept keeps the existing BuildKit HK deployment unchanged and delegates Dockerfile/Compose semantics to Docker's official Buildx remote driver and Compose/Bake frontend. `compose.py` changes publication targets and generates a separate image-reference override; it does not rewrite submitted task files or interpret Dockerfile instructions.
+This opt-in runtime profile delegates Dockerfile/Compose semantics to Docker's official Buildx remote driver and Compose/Bake frontend. It connects to an operator-provided BuildKit service without changing that service's deployment. `compose.py` changes publication targets and generates a separate image-reference override; it does not rewrite submitted task files or interpret Dockerfile instructions.
 
 The runtime tool image contains Docker, Compose, Buildx and the AKernel snapshotter/registration helper. Session endpoints and credentials are injected at launch, outside the image. Buildx pushes native Nydus OCI artifacts directly to an internal CNCF Distribution Registry and returns digest references. No OCI archive passes through the Harbor client and no task artifact is published to ACR.
 
-`image_provider.py` runs on the isolated runtime node. Its session capability accepts only immutable references in an operator-authorized Registry/repository prefix. It validates OCI metadata, calls sandboxd's private image-management Unix socket, and exports existing ROFS through a read-only collection. Dragonfly and the node's existing image manager own content distribution/caching; this adapter does not maintain a second layer cache. `akernel-image-bridge` imports checked metadata and committed roots into inner containerd; unknown extraction roots still fail closed. Private service uppers remain inside the outer sandbox's checkpoint boundary.
+`image_provider.py` runs on the runtime node. Its session capability accepts only immutable references in an operator-authorized Registry/repository prefix. It validates OCI metadata, calls sandboxd's private image-management Unix socket, and exports existing ROFS through a read-only collection. Dragonfly and the node's existing image manager own content distribution/caching; this adapter does not maintain a second layer cache. `akernel-image-bridge` imports checked metadata and committed roots into inner containerd; unknown extraction roots still fail closed. Private service uppers remain inside the outer sandbox's checkpoint boundary.
 
-The Registry requires private routes from HK workers for push and from runtime nodes for pull. Harbor clients do not require direct Registry access or Kubernetes credentials. Registry credentials are separate from AKernel API keys. The experiment profile uses private HTTP, matching the deployed Dragonfly HTTP blob profile; TLS trust-chain qualification remains separate. Standard scoped Bearer authentication can retain access control without applying a password hash to each manifest/blob request. `registry.insecure` is an explicit experiment-profile option, not an unconditional default.
+The Registry requires private routes from build workers for push and from runtime nodes for pull. Harbor clients do not require direct Registry access or Kubernetes credentials. Registry credentials are separate from AKernel API keys. Use TLS with a trust chain available to build workers, runtime nodes and the configured distribution path. Private HTTP requires an explicit isolated-network policy and compatible Dragonfly configuration. Standard scoped Bearer authentication can retain access control without applying a password hash to each manifest/blob request. `registry.insecure` is an explicit operator option, not a default.
 
-BuildKit owns cache validity. Existing worker-local caches reuse steps on the same worker, but the current HK workers use `emptyDir` and the load balancer does not promise affinity. Cross-worker registry cache import/export is a separate native Buildx policy; runtime Nydus artifacts must not be represented as BuildKit cache records. ROFS and Dragonfly cache final content independently from build-step caches.
+BuildKit owns cache validity. Worker-local caches reuse steps on the same worker. Cache persistence and request affinity depend on the BuildKit deployment and are not guaranteed by this adapter. Cross-worker registry cache import/export is a separate native Buildx policy; runtime Nydus artifacts must not be represented as BuildKit cache records. ROFS and Dragonfly cache final content independently from build-step caches.
 
 The runtime retains streamed Buildx diagnostics and allows at most three attempts
 of the same native Bake command when Buildx definitively exits1 with the terminal
@@ -16,7 +16,7 @@ of the same native Bake command when Buildx definitively exits1 with the termina
 `merge nydus layers: get compression blob` variant. Any native
 `no-cache` target limits the operation to one attempt. Build failures, access
 errors, process/transport exceptions, and signal exits propagate directly. This
-is bounded recovery for an observed remote exporter/cache failure; it does not
+is bounded recovery for that specific exporter/cache failure; it does not
 repair the BuildKit implementation or establish an exactly-once contract for
 external side effects in Dockerfile instructions. Final metadata and runtime
 image registration are used only after a successful Bake result.
@@ -54,9 +54,8 @@ The runtime broker delegates bounded, digest-addressed manifest/config reads to 
 See [the operator-only Sandboxd configuration](profile.example.toml).
 
 Size the control plane separately from task sandboxes. The
-[core-chart capacity overlay](control-capacity.example.yaml) records the explicit
-Coordinator budget used for the large-catalog preview, including retained
-snapshot tombstones. It changes no task resource limits and is not a concurrency
+[core-chart capacity overlay](control-capacity.example.yaml) provides an example
+Coordinator budget for environment catalogs and retained snapshot tombstones. It changes no task resource limits and is not a concurrency
 guarantee. Apply it as an operator Helm values file, nested under `core` when
 using the umbrella chart. Track Coordinator memory, restarts and request latency;
 catalog filtering fixes do not eliminate the need for a suitable control budget.
@@ -77,12 +76,12 @@ run `systemctl enable --now akernel-managed-images.service`. No unit/profile is 
 and Registry on reachable internal routes. Never expose the image Unix socket.
 
 The Sandboxd profile owns `image` (digest pinned), `registry`, `repository_prefix`,
-`registry_auth_file`, `registry_insecure` (explicit experiment only),
+`registry_auth_file`, `registry_insecure` (explicit private-HTTP configuration only),
 `buildkit_endpoint`, `provider_url`, `bootstrap_root`, `allowed_tenants`, `writable_mb`, and `minimum_root_mb` (defaults to 4096 MiB). The total writable-storage floor is the image upper plus this root-layer reservation. Before starting each worker, run `python3 builder/managed-docker/profile_metadata.py /path/to/sandboxd.toml` and merge the resulting labels into its ADXlet service `config.labels`. Labels contain only profile names and minimum MiB; regenerate them with every storage-geometry change. The SDK queries this authenticated resource metadata using its own connection before allocating a managed sandbox, reserves the default floor, and adds a hard placement condition for compatible workers. Explicit requests or limits below the floor fail before creation. Sandboxd checks the actual total quota again before any collection filesystem changes. Ordinary image sandboxes do not perform this preflight.
 
 Managed Compose inputs are frozen and uploaded unchanged. The runtime's official `docker compose config` resolves services after startup, including native `!reset` and `!override` tags; the SDK does not parse or merge managed YAML. Call `start_runtime()` before obtaining service handles.
 
-The snapshot compatibility fingerprint excludes `allowed_tenants`. Restore still checks the tenant against the current allowlist first: expanding or reordering authorization preserves compatibility; revocation denies restore. Tool, bootstrap, storage and other captured runtime configuration changes remain incompatible. The older fingerprint format remains incompatible; drain those preview snapshots before upgrading their profile. Node-local lease recovery does not imply cross-node portability or a qualified arbitrary runtime upgrade.
+The snapshot compatibility fingerprint excludes `allowed_tenants`. Restore still checks the tenant against the current allowlist first: expanding or reordering authorization preserves compatibility; revocation denies restore. Tool, bootstrap, storage and other captured runtime configuration changes remain incompatible. An incompatible fingerprint/schema change requires draining the affected snapshot generation before a profile upgrade. Node-local lease recovery does not imply cross-node portability or a qualified arbitrary runtime upgrade.
 The operator, rather than the Harbor user, builds and publishes the tool image
 from this directory and supplies the matching image-bridge binary in its context.
 
@@ -92,17 +91,24 @@ this server-created metadata and reuses the retained collection. Missing or chan
 profile/collection fails closed. It must not rebuild, restart Docker or substitute
 an empty collection. Versioned checkpoints additionally retain their local collection
 lease marker; collection leases and checkpoint output must share a filesystem.
-Restore is same-node only. Production multi-tenant Registry tokens, cross-node
-reconstruction and Registry artifact GC remain separate release requirements.
+Restore is same-node only. Per-tenant Registry credential issuance, cross-node collection reconstruction
+and automatic Registry artifact GC are not provided by this profile.
 
-## Source and release boundary
+## Packaging and compatibility
 
-[Qualification sources](qualification-sources.json) records the explicit review
-baselines, candidate component sources and pinned runtime artifacts. This change
-targets AKernel `develop`, Sandboxd `main` and Agent DX `master`. Source references
-alone do not establish which version is deployed or how much load it passed;
-qualification receipts must record the actual image digests and workload.
+Build the all-in-one image with the repository's maintained build helper. The
+Sandboxd gitlink and runtime manifests select the runtime implementation; the
+Agent DX source reference and platform/Execd URL/checksum pairs must identify the
+same published source. Verify complete package manifests, architecture and
+matching platform/component Execd bytes before packaging. Downloaded optional
+AFS/envd payloads do not enable those services.
 
-The Agent DX source reference and default platform/Execd archive URL/checksum pairs select the same published upstream release. Verify its architecture, complete manifests and matching platform/component Execd bytes before packaging. Source pins alone do not qualify cluster behavior, and downloaded AFS/envd payloads do not enable those capabilities. Keep the deployment's qualified guest-runtime pin when testing control/worker upgrades against retained checkpoints.
+For control-only upgrades, retain the deployment's qualified guest-rootfs pin
+and complete compatible runsc bundle while snapshots depend on them. Changing
+the guest runtime, provider identity or captured profile requires an explicit
+compatibility and retention plan. See
+[runtime-rootfs pinning](../../deploy/docs/runtime-rootfs-pinning.md).
 
-The source-preview Sandboxd gitlink uses the `hky1999` fork so submodule initialization can fetch its unmerged candidate. Agent DX uses its upstream repository. Restore Sandboxd's organization URL and reviewed source pin together after merge; this preview is not a production release approval.
+Record tested sources, image digests, workload results and cleanup in release
+qualification evidence. Keep run-specific measurements, PR status and rollout
+history outside this operator guide.

@@ -1470,9 +1470,9 @@ from a timeout message. `status_code` describes the service failure (including
 an SSE final event's error code); it need not equal the stream's HTTP status.
 
 
-### Managed Docker/Compose runtime (source preview)
+### Client-managed Docker/Compose runtime
 
-This API requires the SDK source revision containing managed Docker support; published `0.2.0rc3` does not provide it. It builds on the reusable snapshot API already merged into `develop`. Prepare a compatible runsc deployment with sandboxd managed file-backed tmpfs support. Select reflink checkpoint mode and durable sync in deployment configuration; the SDK never modifies cluster settings. See [runtime prerequisites](../../builder/image-bridge/README.md).
+For a platform-owned deployment, use the [managed profile](#platform-managed-native-docker-builds). The client-managed API below requires a compatible runsc deployment with Sandboxd managed file-backed tmpfs support. Select reflink checkpoint mode and durable sync in deployment configuration; the SDK never modifies cluster settings. See [runtime prerequisites](../../builder/image-bridge/README.md).
 
 ```python
 from pathlib import Path
@@ -1495,8 +1495,9 @@ sandbox = Sandbox(
 try:
     runtime.start(sandbox, network="bridge")
     # Upload the original project; run ordinary docker compose build/up here.
-    # Quiesce tools and synchronize any client-side harness state before saving.
+    # Persist any client-side state that must stay aligned with the snapshot.
     snapshot = sandbox.create_snapshot(timeout=300)
+    sandbox.kill()  # Fence the source before creating a running clone.
     restored = Sandbox.from_snapshot(
         snapshot, cwd="/", failover=False, **runtime.sandbox_options(),
         # Explicitly rebind any reverse_tunnel and current network_policy here.
@@ -1525,19 +1526,19 @@ image build or registry push is needed. A compatible prebuilt image can still be
 selected explicitly to avoid installing packages during startup. Restore never
 repeats runtime installation or starts another Docker daemon.
 
-### Compose projects and service processes (source preview)
+### Compose projects and service processes
 
-`ComposeProject`, `ServiceHandle` and `ServiceProcessHandle` are provided by this source revision. They use the same managed Docker runtime and existing ROFS provider described above. Their backend-neutral operations use the existing Agent DX API. The managed file-backed upper profile additionally requires compatible Sandboxd support; installing this Python SDK alone does not enable it. The framework/runtime boundary and integration order are described in [managed Compose integration](docs/managed-compose.md). A complete client-side example is in [compose_checkpoint.py](examples/compose_checkpoint.py).
+`ComposeProject`, `ServiceHandle` and `ServiceProcessHandle` expose project, service and process operations. They use the same managed Docker runtime and existing ROFS provider described above. Their backend-neutral operations use the Agent DX API. The managed file-backed upper profile additionally requires compatible Sandboxd support; installing this Python SDK alone does not enable it. The framework/runtime boundary and prerequisites are described in [managed Compose integration](docs/managed-compose.md). A complete client-side example is in [compose_checkpoint.py](examples/compose_checkpoint.py).
 
-`ComposeProject.prepare()` freezes a private local copy of the selected context and Compose bytes, discovers image inputs from that copy and produces sandbox mount/config options. Put `output_dir` outside the input context. Keep build contexts inside the selected directory. The default `network="bridge"` preserves original Compose network definitions, Docker IPAM, DNS and published TCP/UDP ports. The explicit `network="host"` compatibility profile still adds host/loopback aliases and rejects explicit Compose networks. Scaled service process handles are rejected. Task files are not rewritten. Generic SDK defaults contain no Harbor service or artifact names.
+`ComposeProject.prepare()` freezes a private local copy of the selected context and Compose bytes and produces sandbox options. The platform-managed profile resolves services through official Compose after `start_runtime()`; client-managed mode discovers image inputs locally. Put `output_dir` outside the input context. Keep build contexts inside the selected directory. The default `network="bridge"` preserves original Compose network definitions, Docker IPAM, DNS and published TCP/UDP ports. The explicit `network="host"` compatibility profile still adds host/loopback aliases and rejects explicit Compose networks. Scaled service process handles are rejected. Task files are not rewritten. Generic SDK defaults contain no Harbor service or artifact names.
 
-In automatic image mode, both Dockerfile bases and image-only services use pinned ROFS mounts. `pull()` verifies their Docker references and committed snapshots; `up()` verifies them again and prevents native repeat pulls. This includes `image: name:tag@sha256:...`, for which native Compose's missing policy can still request layer extraction. Tags are resolved once during preparation; missing or changed registrations fail without fallback. Without automatic images, native Compose pull behavior is retained.
+In client-managed automatic image mode, both Dockerfile bases and image-only services use pinned ROFS mounts. `pull()` verifies their Docker references and committed snapshots; `up()` verifies them again and prevents native repeat pulls. This includes `image: name:tag@sha256:...`, for which native Compose's missing policy can still request layer extraction. Tags are resolved once during preparation; missing or changed registrations fail without fallback. Without automatic images, native Compose pull behavior is retained.
 
-This revision requires an image bridge reporting `discover_schema: 2` via
-`--mode capabilities`; replace older helpers before upgrading the SDK. Discovery
+Client-managed discovery requires an image bridge reporting `discover_schema: 2`
+via `--mode capabilities`. Discovery
 confines build/Dockerfile and `.env` reads to the frozen context and receives
 only explicitly supplied project variables. `include` / `extends.file` and
-remote contexts are not supported in this source preview. Valid shared chains
+remote contexts are not supported in client-managed discovery. Valid shared chains
 across different manifests/configs are supported after OCI configuration checks.
 
 ```python
@@ -1588,9 +1589,9 @@ Unknown start failures retain `error.process_descriptor`; attach using that toke
 `ComposeProject.attach()` only reconstructs client bindings. It does not upload files, start daemons, build images or recreate services. Snapshot restore must retain the same mount/upper options, rebind tunnels and the current network policy, and fence the previous execution before resuming it. Application conversation state and checkpoint timing remain with the application. Descriptors may contain explicit project environment values; store them with the same protection as application configuration.
 
 
-### Native Compose networking and model tunnels (source preview)
+### Native Compose networking and model tunnels
 
-The validated Linux/amd64 runsc profile requires Docker 28's operator-owned
+The Linux/amd64 runsc Docker profile requires Docker 28's operator-owned
 `--net-raw=true` and `--allow-packet-socket-write=true` flags. The outer runtime
 image supplies `ip`, `iptables-legacy` and `iptables-legacy-restore`. No task
 Dockerfile or Compose edit is needed. These are node/runtime prerequisites;
@@ -1603,14 +1604,14 @@ embedded DNS and TCP/UDP userland port proxies. Global dockerd iptables handling
 is disabled because this runsc lacks Docker's `addrtype` matcher. A daemon-only
 PATH selects legacy tools for Docker's per-container DNS DNAT; system symlinks
 and original user files are preserved. IPv6-only egress, non-bridge drivers and
-all Docker firewall/driver options have not been qualified by this regression.
+arbitrary Docker firewall/driver options are outside the supported profile.
 
 After restoring to a new outer TAP/address, call `project.reconnect_network()`
 (or `DockerRuntime.reconnect_network(restored)` for the low-level API) before
 resuming work. It replaces only SDK-owned forwarding/NAT chains, retaining
 conntrack and the captured bridges, containers, DNS/proxies and inner sockets.
 `attach()` itself remains free of remote operations. Established connections
-inside the sandbox, including through its published-port proxy, are tested.
+inside the sandbox, including through its published-port proxy, are retained.
 Connections to external peers do not acquire address-migration guarantees.
 
 An `HttpReverseTunnel` listens on the **outer** loopback. For a service on its
@@ -1648,9 +1649,9 @@ mappings, peer-restricted model HTTP/auth/SSE, new egress, and original service
 and published-port TCP sockets across two snapshot/delete/restore cycles. All
 owned environments and snapshots are deleted; no deployment is changed.
 
-Service process trees freeze waiters before descendants and thaw descendants before waiters. This avoids Bash treating a still-stopped child as an exited tool (status 147); the regression uses a real job-control Bash waiter with a forced scheduler switch. Numeric PID order is not used as ancestry.
+Explicit service process-tree control freezes waiters before descendants and thaws descendants before waiters, preserving Bash job-control wait semantics. Numeric PID order is not used as ancestry. Whole-sandbox checkpointing does not require these signals.
 
-### Platform-managed native Docker builds (preview)
+### Platform-managed native Docker builds
 
 When an operator enables a named managed-runtime profile, clients submit its
 capability name. They do not need Docker, Kubernetes access, a Registry route,
@@ -1705,7 +1706,7 @@ Restore uses `ComposeProject.attach()` and saved descriptors; it never rebuilds
 or reruns Docker startup. Snapshot metadata contains an opaque server-created
 collection identity, checked against the tenant and profile on restore.
 
-This opt-in preview requires same-node retained collections and the same mount
+This opt-in profile requires same-node retained collections and the same mount
 view. Version-1 collections use durable local live/checkpoint leases and are
 retired after their last reference disappears; retained checkpoints keep their
 ROFS mounts pinned. Service restart recovers these leases before admission.
@@ -1713,5 +1714,5 @@ Legacy collections require an operator drain. This local mount cleanup does not
 delete Registry artifacts. Cross-node reconstruction, Pod replacement with a
 changed provider identity, and automatic Registry artifact GC remain outside
 the qualified contract.
-The isolated HTTP Registry account is not a multi-tenant scoped Registry token;
-operators must qualify TLS and repository-scoped credentials before wider use.
+Operators own Registry TLS and repository-scoped authorization. A shared
+Registry account does not provide per-tenant image isolation.
