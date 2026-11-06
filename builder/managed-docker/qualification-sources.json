@@ -9,21 +9,21 @@
     },
     "sandboxd": {
       "branch": "main",
-      "commit": "65eda5fc0dd014f600a6bbdade8cd936fe18c252"
+      "commit": "b40dc09ea2e8dc22a8bf48af5a1f6e6aa4ac64f2"
     },
     "agent_dx": {
       "branch": "master",
-      "commit": "6a4c6d872edd6596361da3cb0e27ca55c3f5e1b0"
+      "commit": "2f61d44d9c56ae029a06698c337cbdc4aeaaa7af"
     }
   },
   "candidate_gitlinks": {
-    "sandboxd": "56d9b015fafd21443fa760b3f38afe20d7856458",
-    "agent_dx": "e611b9e4a83dcd6da5346bd17c2f6af28e244952"
+    "sandboxd": "ddfc4a7c809633aa096b66be6a270c2430c00110",
+    "agent_dx": "2f61d44d9c56ae029a06698c337cbdc4aeaaa7af"
   },
   "pinned_runtime_artifacts": {
     "gvisor": {
-      "source": "63de4896444eb140221c1284fa621394666224af",
-      "release": "release-20261012.0-akernel.3"
+      "source": "49590af731d7893e6c7cb33632068e5d4e4cf7fe",
+      "release": "release-20261012.0-akernel.4"
     },
     "distill_fs": {
       "source": "90227ac3a2f9fb919cfabc3e346b560ecae193e7",
@@ -39,12 +39,20 @@
   },
   "afs_enabled": false,
   "envd_enabled": false,
-  "publication_requirement": "Default Agent DX platform and Execd URL/checksum pairs select the matching upstream-published release. Verify architecture, manifests and matching Execd bytes before packaging. Sandboxd remains a source-preview candidate pending review and cluster qualification; full runtime artifacts remain pinned to their published bundles.",
+  "publication_requirement": "The default amd64 platform/Execd URL and checksum pairs select the same clean merged upstream Agent DX source and matching static Execd bytes from a fixed fork prerelease. Verify architecture and complete manifests before packaging. This is a preview, not an upstream Agent DX release or completed cluster qualification. Sandboxd combines pending #101 with main including merged #102; gVisor uses the organization-published complete .4 bundle. The native Python SDK dependency remains index-resolved rc4; separately pinned Harbor source-client qualification is recorded outside this package.",
   "candidate_patch": {
     "sandboxd": {
-      "source_commit": "56d9b015fafd21443fa760b3f38afe20d7856458",
+      "source_commit": "ddfc4a7c809633aa096b66be6a270c2430c00110",
       "pull_request": "https://github.com/inclusionAI/sandboxd/pull/101",
-      "reason": "Collection-scoped image ownership and durable node-local live/checkpoint leases; remove service-lifetime unused ROFS retention. Local gates passed; cluster qualification recorded separately."
+      "reason": "Collection-scoped image ownership and durable node-local live/checkpoint leases; remove service-lifetime unused ROFS retention. Local gates passed; cluster qualification recorded separately.",
+      "upstream_runtime_pin": "https://github.com/inclusionAI/sandboxd/pull/102"
     }
+  },
+  "agent_dx_platform_artifacts": {
+    "source_commit": "2f61d44d9c56ae029a06698c337cbdc4aeaaa7af",
+    "publication": "https://github.com/hky1999/agent-dx/releases/tag/akernel-hk1019-preview-20261106.1",
+    "platform_sha256": "148b73a227ee4cee8dbae58b9fa3143bae6e3b6b015dcf59251677848a78dbf5",
+    "execd_sha256": "2129830703a972b94e56130e7fd2aab827e841124a7139957ca4e15540172ed2",
+    "status": "Exact-source fork prerelease of merged upstream master, built by the maintained native release command; cluster qualification remains separate."
   }
 }
